@@ -1,0 +1,103 @@
+//! Self-resilience: make the running process independent of its on-disk
+//! executable so it survives being deleted, overwritten, or shredded by itself.
+//!
+//! Strategy (Linux): at startup, copy the process's own executable image into
+//! an anonymous, memory-backed file (`memfd_create`) and re-execute from that
+//! memfd via `fexecve`. After the re-exec, the process image is backed by the
+//! anonymous memfd; nothing that happens to the original on-disk file (unlink,
+//! truncate, overwrite) can unmap pages or cause SIGBUS.
+//!
+//! Combined with a statically linked (musl) build there are no external shared
+//! objects to lose either. See the README for platform scope and limitations.
+//!
+//! This is best-effort: if any step fails we log a note (only in verbose mode)
+//! and continue running from the on-disk image, relying on the fact that a
+//! static build already keeps its pages resident.
+
+use std::ffi::CString;
+
+/// Env var used to break the re-exec loop: set on the child so it does not try
+/// to re-exec again.
+const GUARD: &str = "OVERRIDE_MEMFD_REEXEC";
+
+/// Re-execute the current process from an in-memory copy of its executable.
+///
+/// On success this never returns (the process image is replaced). On failure,
+/// or if already re-executed, it returns and the caller continues normally.
+pub fn reexec_from_memfd(verbose: bool) {
+    if std::env::var_os(GUARD).is_some() {
+        return; // Already running from the memfd copy.
+    }
+
+    match try_reexec() {
+        Ok(()) => unreachable!("fexecve returned without replacing the image"),
+        Err(e) => {
+            if verbose {
+                eprintln!(
+                    "[resilience] memfd re-exec unavailable ({e}); continuing from on-disk image"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn try_reexec() -> std::io::Result<()> {
+    use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+
+    // Read our own executable image. /proc/self/exe still resolves even if the
+    // path has since been unlinked, and reads the real backing file.
+    let image = std::fs::read("/proc/self/exe")?;
+
+    // Anonymous memory-backed fd. No CLOEXEC: the fd must survive fexecve.
+    let name = CString::new("override").unwrap();
+    let memfd = memfd_create(&name, MemFdCreateFlag::empty())
+        .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+
+    // Write the image into the memfd.
+    {
+        let mut f = unsafe {
+            use std::os::fd::{FromRawFd, IntoRawFd};
+            // Duplicate ownership handling: build a File that writes to the fd
+            // without taking ownership of the OwnedFd we still need for exec.
+            let raw = memfd.as_raw_fd();
+            let dup = nix::unistd::dup(raw).map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+            std::fs::File::from_raw_fd(dup.into_raw_fd())
+        };
+        f.write_all(&image)?;
+        f.flush()?;
+    }
+
+    // Rebuild argv and envp, adding the guard so the child does not re-exec.
+    let argv: Vec<CString> = std::env::args_os()
+        .map(|a| CString::new(a.to_string_lossy().into_owned()).unwrap_or_else(|_| CString::new("").unwrap()))
+        .collect();
+
+    let mut envp: Vec<CString> = std::env::vars_os()
+        .filter(|(k, _)| k != GUARD)
+        .map(|(k, v)| {
+            CString::new(format!(
+                "{}={}",
+                k.to_string_lossy(),
+                v.to_string_lossy()
+            ))
+            .unwrap_or_else(|_| CString::new("PLACEHOLDER=1").unwrap())
+        })
+        .collect();
+    envp.push(CString::new(format!("{GUARD}=1")).unwrap());
+
+    // Replace the process image. On success this does not return.
+    nix::unistd::fexecve(memfd.as_raw_fd(), &argv, &envp)
+        .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn try_reexec() -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "memfd re-exec is only implemented on Linux",
+    ))
+}

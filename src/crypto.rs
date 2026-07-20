@@ -1,0 +1,132 @@
+//! Encryption phase: crypto-shredding.
+//!
+//! Each pass generates a fresh random ChaCha20-Poly1305 key, encrypts the
+//! file's current bytes in place, then zeroizes the key. Because the key is
+//! discarded, the plaintext becomes cryptographically inaccessible.
+//!
+//! The file is processed in fixed-size chunks so files of any size use bounded
+//! memory. Each chunk is authenticated-encrypted with a per-chunk nonce; we
+//! write back only the ciphertext (same length as the plaintext, since
+//! ChaCha20 is a stream cipher) so the overwrite is strictly in place -- the
+//! original plaintext blocks are physically rewritten rather than reallocated.
+//! The 16-byte authentication tag is intentionally discarded with the key,
+//! because the data is never meant to be decrypted again.
+
+use crate::signals;
+use crate::CHUNK;
+use chacha20poly1305::aead::AeadInPlace;
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
+use rand::rngs::OsRng;
+use rand::RngCore;
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use zeroize::Zeroize;
+
+/// Build a 12-byte nonce from a chunk index. Each pass uses a fresh key, so a
+/// simple monotonic counter nonce is unique per (key, chunk) as required.
+fn nonce_from_index(index: u64) -> Nonce {
+    let mut n = [0u8; 12];
+    n[..8].copy_from_slice(&index.to_le_bytes());
+    *Nonce::from_slice(&n)
+}
+
+/// Perform one in-place encryption pass over an already-open file.
+///
+/// The key is generated here, used, and zeroized before returning. It is never
+/// returned, logged, or written anywhere.
+pub fn encrypt_pass(file: &mut File, len: u64) -> io::Result<()> {
+    // Fresh 256-bit key from the OS CSPRNG, held in a zeroizing buffer.
+    let mut key = [0u8; 32];
+    OsRng.fill_bytes(&mut key);
+
+    let cipher = ChaCha20Poly1305::new_from_slice(&key)
+        .map_err(|e| io::Error::other(format!("cipher init: {e}")))?;
+    // The raw key bytes are no longer needed once the cipher holds them.
+    key.zeroize();
+
+    let mut buf = vec![0u8; CHUNK];
+    let mut offset: u64 = 0;
+    let mut index: u64 = 0;
+
+    let result = (|| {
+        while offset < len {
+            let this = std::cmp::min(CHUNK as u64, len - offset) as usize;
+
+            file.seek(SeekFrom::Start(offset))?;
+            file.read_exact(&mut buf[..this])?;
+
+            let nonce = nonce_from_index(index);
+            // Authenticated encryption in place; the tag is dropped on purpose.
+            cipher
+                .encrypt_in_place_detached(&nonce, b"", &mut buf[..this])
+                .map_err(|e| io::Error::other(format!("encrypt chunk: {e}")))?;
+
+            file.seek(SeekFrom::Start(offset))?;
+            file.write_all(&buf[..this])?;
+
+            offset += this as u64;
+            index += 1;
+
+            // A graceful interrupt lets the current (already-written) chunk
+            // stand and stops the pass; the file remains fully overwritten up
+            // to `offset`, and later phases still run.
+            if signals::interrupted() {
+                break;
+            }
+        }
+        file.flush()?;
+        file.sync_all()?;
+        Ok(())
+    })();
+
+    // Best-effort scrub of any plaintext lingering in the working buffer.
+    buf.zeroize();
+    // `cipher` (holding the key) is dropped here; the chacha20poly1305 crate
+    // zeroizes its internal key material on drop.
+    drop(cipher);
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn encryption_preserves_length_and_changes_content() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        let plaintext = vec![0xAAu8; 5000];
+        tmp.write_all(&plaintext).unwrap();
+        tmp.flush().unwrap();
+
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp.path())
+            .unwrap();
+        encrypt_pass(&mut file, plaintext.len() as u64).unwrap();
+
+        let mut after = Vec::new();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.read_to_end(&mut after).unwrap();
+
+        // Same length (in-place stream-cipher overwrite)...
+        assert_eq!(after.len(), plaintext.len());
+        // ...but the plaintext is gone.
+        assert_ne!(after, plaintext);
+    }
+
+    #[test]
+    fn encryption_of_empty_file_is_noop() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp.path())
+            .unwrap();
+        // Must not panic or error on a zero-length file.
+        encrypt_pass(&mut file, 0).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 0);
+    }
+}
