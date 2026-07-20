@@ -44,11 +44,28 @@ script, which downloads the prebuilt binary for your architecture (`x86_64` or
 ./install.sh --remove
 ```
 
-Every download is verified against **both** the SHA256 and SHA512 digests
-published in the release's `checksums` asset before the binary is installed; a
-mismatch, a missing entry, or an unreachable checksums file aborts the install
-(fail-closed). Pass `--no-checksum` to skip verification (e.g. for an older
-release published without a checksums file) — not recommended.
+Every download is cryptographically verified before it is installed. The script
+checks the release's minisign signature (`override-<arch>-linux.minisig`) against
+the project's **public key embedded in `install.sh` itself** — never a key
+downloaded at install time. That embedded key (also published as
+`override_release_minisign.pub`, and carried in the script's git history) is the
+trust anchor: an attacker who compromised the GitHub release still could not
+forge an accepted binary without also rewriting the key across every historical
+commit. A bad or missing signature aborts the install (fail-closed).
+
+Verification uses the [`minisign`](https://jedisct1.github.io/minisign/) tool
+when it is installed. If it is **not**, the script does not silently improvise —
+it asks how to proceed:
+
+1. use the script's built-in OpenSSL (Ed25519 + BLAKE2b) verifier — a
+   re-implementation of minisign verification, handy when you can't install
+   minisign;
+2. abort so you can install minisign yourself and re-run (recommended); or
+3. skip verification, which requires typing an explicit acknowledgement.
+
+With no terminal available (CI, cron, `curl … | bash` with no tty) it fails
+closed and aborts. Pass `--insecure-skip-verify` to skip verification up front
+without a prompt — strongly discouraged.
 
 Re-running the script simply installs over the existing binary, so it doubles as
 the upgrade/downgrade path. Only Linux on `x86_64`/`aarch64` is supported.
