@@ -18,6 +18,29 @@ and directories so their content cannot be recovered. It is inspired by GNU
 
 ---
 
+## Install (prebuilt binary)
+
+The quickest way to install a released version system-wide is the `install.sh`
+script, which downloads the prebuilt binary for your architecture (`x86_64` or
+`aarch64`) from the GitHub Releases:
+
+```sh
+# install the default version to /usr/local/bin (uses sudo if needed)
+./install.sh
+
+# install a specific version, or into a custom prefix
+./install.sh --version v1.0.0 --prefix ~/.local/bin
+
+# preview what would happen without changing anything (also checks the URL)
+./install.sh --dry
+
+# uninstall
+./install.sh --remove
+```
+
+Re-running the script simply installs over the existing binary, so it doubles as
+the upgrade/downgrade path. Only Linux on `x86_64`/`aarch64` is supported.
+
 ## Build
 
 Requires a Rust toolchain (tested with Rust 1.97).
