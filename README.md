@@ -115,7 +115,7 @@ override [OPTIONS] <PATH>...
 | `-p` | `--prompt` | — | off | Read target paths from stdin (one per line, blank line or EOF to finish) instead of the command line, so the names of destroyed files are never recorded in your shell history. Command-line paths are still processed. |
 | `-r` | `--recursive` | — | off | Recurse into directories. Without it, a directory argument is a reported error. |
 | `-e` | `--encryption` | `N` | `1` | Encryption (crypto-shred) passes. `0` disables. |
-| `-i` | `--iterations` | `N` | `3` | Random-overwrite passes (applied in **each** of the two random rounds). `0` disables. |
+| `-i` | `--iterations` | `N` | `1` | Random-overwrite passes (applied in **each** of the two random rounds). `0` disables. |
 | `-n` | `--null` | `N` | `1` | Zero-fill passes. `0` disables. |
 | | `--no-verify` | — | off | Skip read-back verification of the encryption pass (faster; not recommended for serious use — verification is on by default). |
 | `-s` | `--source` | `PATH` | CSPRNG | File to use as the byte source for overwrites (streamed, wrapping). ⚠️ predictable sources weaken the overwrite passes — prefer the CSPRNG. |
