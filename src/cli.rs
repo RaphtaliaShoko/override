@@ -38,14 +38,29 @@ pub enum Order {
         override -i 0 -e 0 -n 3 log.txt     Null-only wipe (no encryption/random)\n  \
         override -s /dev/urandom big.img    Use an explicit byte source for overwrites\n  \
         override --no-stop -u 5 target.dat  Loop forever, then 5 renames + delete on Ctrl-C\n  \
-        override -o batch *.log             Batch order across many files\n\n\
+        override -o batch *.log             Batch order across many files\n  \
+        override -p                         Type paths on stdin so they stay out of shell history\n\n\
         Note: on SSDs and copy-on-write filesystems (btrfs, ZFS, ...) logical\n\
         overwrites may not reach the original physical blocks; see the README."
 )]
 pub struct Cli {
     /// Files and/or directories to destroy.
-    #[arg(value_name = "PATH", required = true)]
+    ///
+    /// Passing paths here records them in your shell history, so the names of
+    /// destroyed files remain visible afterwards. Use `--prompt` to type paths
+    /// interactively instead (they are read from stdin and never appear as
+    /// arguments).
+    #[arg(value_name = "PATH", required_unless_present = "prompt")]
     pub paths: Vec<PathBuf>,
+
+    /// Read one or more target paths interactively from stdin instead of (or in
+    /// addition to) the command line, one per line, until a blank line or EOF.
+    ///
+    /// Because the paths are never passed as arguments, they are not saved in
+    /// the shell's command history -- useful when the very existence of a file
+    /// is sensitive. Any paths given on the command line are processed too.
+    #[arg(short, long)]
+    pub prompt: bool,
 
     /// Print detailed progress for every file, phase and pass.
     #[arg(short, long)]
@@ -120,5 +135,20 @@ mod tests {
     #[test]
     fn requires_at_least_one_path() {
         assert!(Cli::try_parse_from(["override"]).is_err());
+    }
+
+    #[test]
+    fn prompt_makes_positional_paths_optional() {
+        // With --prompt, paths are read from stdin, so none are required.
+        let cli = Cli::try_parse_from(["override", "--prompt"]).unwrap();
+        assert!(cli.prompt);
+        assert!(cli.paths.is_empty());
+    }
+
+    #[test]
+    fn prompt_still_accepts_command_line_paths() {
+        let cli = Cli::try_parse_from(["override", "-p", "a.txt"]).unwrap();
+        assert!(cli.prompt);
+        assert_eq!(cli.paths, vec![PathBuf::from("a.txt")]);
     }
 }

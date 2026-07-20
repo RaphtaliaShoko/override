@@ -59,6 +59,7 @@ override [OPTIONS] <PATH>...
 | Short | Long | Arg | Default | Description |
 |---|---|---|---|---|
 | `-v` | `--verbose` | — | off | Print progress for every file/phase/pass. |
+| `-p` | `--prompt` | — | off | Read target paths from stdin (one per line, blank line or EOF to finish) instead of the command line, so the names of destroyed files are never recorded in your shell history. Command-line paths are still processed. |
 | `-r` | `--recursive` | — | off | Recurse into directories. Without it, a directory argument is a reported error. |
 | `-e` | `--encryption` | `N` | `1` | Encryption (crypto-shred) passes. `0` disables. |
 | `-i` | `--iterations` | `N` | `3` | Random-overwrite passes (applied in **each** of the two random rounds). `0` disables. |
@@ -80,7 +81,15 @@ override -i 0 -e 0 -n 3 log.txt          # null-only wipe
 override -s /dev/urandom big.img         # explicit byte source
 override --no-stop -u 5 target.dat       # loop; on Ctrl-C, 5 renames + delete
 override -o batch *.log                  # batch order across many files
+override -p                              # type paths interactively (kept out of shell history)
+printf '%s\n' secret.txt >> ~/list; override -p < ~/list   # feed paths via stdin
 ```
+
+> **Keeping filenames out of your history.** A normal invocation such as
+> `override secret.txt` records `secret.txt` in your shell's history file, so the
+> name of the destroyed file stays visible afterwards. Run `override -p` and type
+> (or pipe) the path on stdin instead: the path is never an argument, so it is
+> never written to history.
 
 ---
 

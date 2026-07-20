@@ -24,12 +24,62 @@ pub struct Runner {
 }
 
 impl Runner {
-    pub fn new(cli: Cli) -> io::Result<Self> {
+    pub fn new(mut cli: Cli) -> io::Result<Self> {
+        if cli.prompt {
+            // Read targets from stdin so their names never land in the shell
+            // history (they are not passed as command-line arguments). Prompted
+            // paths are appended to any given on the command line.
+            let prompted = Self::read_prompted_paths(cli.verbose)?;
+            cli.paths.extend(prompted);
+        }
         let source = match &cli.source {
             Some(p) => ByteSource::from_file(p)?,
             None => ByteSource::csprng(),
         };
         Ok(Runner { cli, source })
+    }
+
+    /// Read target paths from stdin, one per line, until a blank line or EOF.
+    ///
+    /// The prompt is written to stderr so it does not interfere with piping and
+    /// so a heredoc/pipe of paths (`printf '%s\n' a b | override -p`) also works
+    /// non-interactively. Whitespace-only lines are treated as the terminator.
+    fn read_prompted_paths(verbose: bool) -> io::Result<Vec<PathBuf>> {
+        use std::io::Write;
+
+        let mut paths = Vec::new();
+        let stdin = io::stdin();
+        let mut err = io::stderr();
+        let interactive = io::IsTerminal::is_terminal(&stdin);
+
+        if interactive {
+            let _ = writeln!(
+                err,
+                "override: enter one path per line; blank line or Ctrl-D to finish"
+            );
+        }
+
+        loop {
+            if interactive {
+                let _ = write!(err, "path> ");
+                let _ = err.flush();
+            }
+            let mut line = String::new();
+            let n = stdin.read_line(&mut line)?;
+            if n == 0 {
+                break; // EOF
+            }
+            let trimmed = line.trim_end_matches(|c| c == '\n' || c == '\r');
+            if trimmed.trim().is_empty() {
+                break; // blank line terminates the list
+            }
+            if verbose {
+                let _ = writeln!(err, "override: queued {trimmed}");
+            }
+            paths.push(PathBuf::from(trimmed));
+        }
+
+        Ok(paths)
     }
 
     fn vlog(&self, args: std::fmt::Arguments) {
