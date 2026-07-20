@@ -51,7 +51,7 @@ set -euo pipefail
 
 REPO="RaphtaliaShoko/override"
 BIN_NAME="override"
-DEFAULT_VERSION="v1.0.0"
+DEFAULT_VERSION="v1.1.0"
 DEFAULT_PREFIX="/usr/local/bin"
 
 # Trust anchor: the project's minisign public key, embedded here on purpose.
