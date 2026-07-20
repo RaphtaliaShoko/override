@@ -118,6 +118,20 @@ mod tests {
     }
 
     #[test]
+    fn zeroize_actually_scrubs_key_material() {
+        // Locks the scrubbing contract we rely on in `encrypt_pass`: after
+        // `.zeroize()` the buffer must be all zeros. `zeroize` performs volatile
+        // writes with a compiler fence, so this is NOT elided even under the
+        // release profile (`lto = true`, `opt-level = 3`) -- which is exactly
+        // why the crate is used instead of a plain assignment the optimizer
+        // could remove. Guards against someone silently swapping it out.
+        let mut key = [0xAAu8; 32];
+        assert!(key.iter().all(|&b| b == 0xAA));
+        key.zeroize();
+        assert!(key.iter().all(|&b| b == 0), "zeroize left non-zero bytes");
+    }
+
+    #[test]
     fn encryption_of_empty_file_is_noop() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let mut file = std::fs::OpenOptions::new()

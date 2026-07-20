@@ -12,7 +12,11 @@ pub enum ByteSource {
     /// Cryptographically secure OS RNG.
     Csprng,
     /// A file read repeatedly (wrapping) to cover files of any size.
-    SourceFile { path: PathBuf, data: Vec<u8>, pos: usize },
+    SourceFile {
+        path: PathBuf,
+        data: Vec<u8>,
+        pos: usize,
+    },
 }
 
 impl ByteSource {

@@ -33,7 +33,17 @@ impl Runner {
             cli.paths.extend(prompted);
         }
         let source = match &cli.source {
-            Some(p) => ByteSource::from_file(p)?,
+            Some(p) => {
+                // Surface the caution even when --help was never read: a custom
+                // source is only as unpredictable as its contents.
+                eprintln!(
+                    "override: warning: using a custom --source ({}); \
+                     a predictable source weakens the overwrite passes and is \
+                     not recommended for serious security use (prefer the CSPRNG)",
+                    p.display()
+                );
+                ByteSource::from_file(p)?
+            }
             None => ByteSource::csprng(),
         };
         Ok(Runner { cli, source })
@@ -175,7 +185,11 @@ impl Runner {
         for pass in 1..=passes {
             let (mut file, len) = Self::open_rw(path)?;
             overwrite::overwrite_pass(&mut file, len, &mut Fill::Random(&mut self.source))?;
-            let src = if self.source.is_file() { "source-file" } else { "csprng" };
+            let src = if self.source.is_file() {
+                "source-file"
+            } else {
+                "csprng"
+            };
             self.vlog(format_args!(
                 "  [random {}] {} pass {}/{} ({}, len {})",
                 round,
@@ -328,7 +342,9 @@ impl Runner {
             }
         }
 
-        self.vlog(format_args!("interrupt received; renaming and deleting targets"));
+        self.vlog(format_args!(
+            "interrupt received; renaming and deleting targets"
+        ));
         for (idx, path) in files.iter().enumerate() {
             if !alive[idx] {
                 continue;

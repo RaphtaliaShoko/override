@@ -138,7 +138,11 @@ mod tests {
         tmp.write_all(&vec![0xFFu8; 4096]).unwrap();
         tmp.flush().unwrap();
 
-        let mut f = OpenOptions::new().read(true).write(true).open(tmp.path()).unwrap();
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp.path())
+            .unwrap();
         overwrite_pass(&mut f, 4096, &mut Fill::Null).unwrap();
 
         assert_eq!(read_all(tmp.path()), vec![0u8; 4096]);
@@ -151,7 +155,11 @@ mod tests {
         tmp.write_all(&orig).unwrap();
         tmp.flush().unwrap();
 
-        let mut f = OpenOptions::new().read(true).write(true).open(tmp.path()).unwrap();
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp.path())
+            .unwrap();
         let mut src = ByteSource::csprng();
         overwrite_pass(&mut f, 4096, &mut Fill::Random(&mut src)).unwrap();
 

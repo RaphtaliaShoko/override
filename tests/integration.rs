@@ -144,7 +144,10 @@ fn no_stop_can_be_interrupted_and_still_deletes() {
             assert!(status.success(), "exit status: {status:?}");
             break;
         }
-        assert!(Instant::now() < deadline, "no-stop did not exit after SIGINT");
+        assert!(
+            Instant::now() < deadline,
+            "no-stop did not exit after SIGINT"
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(!target.exists(), "target must be deleted after interrupt");
@@ -185,13 +188,98 @@ fn self_resilience_shreds_own_binary() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(!exe_copy.exists(), "the binary's own copy must be destroyed");
+    assert!(
+        !exe_copy.exists(),
+        "the binary's own copy must be destroyed"
+    );
     assert!(!v1.exists());
     assert!(!v2.exists());
     assert_eq!(count_files(dir.path()), 0, "everything destroyed");
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("3 destroyed"), "stdout: {stdout}");
+}
+
+/// Partial failure: a non-existent target among valid ones must not stop the
+/// valid ones, and the process must exit non-zero. Deterministic regardless of
+/// the running user's privileges.
+#[test]
+fn missing_path_fails_but_valid_target_is_destroyed() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = dir.path().join("good.txt");
+    write_file(&good, b"destroy me");
+    let missing = dir.path().join("nope").join("does-not-exist");
+
+    let out = Command::new(bin())
+        .arg(&good)
+        .arg(&missing)
+        .output()
+        .unwrap();
+
+    // One target failed -> non-zero exit (code 1).
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(1), "exit code should be 1");
+    // The valid file was still destroyed.
+    assert!(!good.exists(), "good.txt should be destroyed");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does-not-exist"),
+        "stderr should mention the missing path: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("1 destroyed") && stdout.contains("1 failed"),
+        "summary should report 1 destroyed, 1 failed: {stdout}"
+    );
+}
+
+/// Partial failure via permission denied: one file lives in a read-only
+/// directory (so its rename/unlink fails), a sibling is writable. The sibling
+/// must be destroyed, the protected file must survive, exit code 1. Skipped
+/// when running as root, which bypasses directory permission bits.
+#[test]
+#[cfg(unix)]
+fn permission_denied_on_one_target_still_destroys_others() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: running as root bypasses permission bits");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+
+    // Writable sibling that should be destroyed.
+    let writable = dir.path().join("writable.txt");
+    write_file(&writable, b"destroy me");
+
+    // A file inside a directory we will mark read-only + no-exec-traverse, so
+    // the unlink (which needs write on the parent dir) is denied.
+    let locked_dir = dir.path().join("locked");
+    fs::create_dir(&locked_dir).unwrap();
+    let protected = locked_dir.join("protected.txt");
+    write_file(&protected, b"cannot remove me");
+    fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o500)).unwrap();
+
+    let out = Command::new(bin())
+        .arg(&writable)
+        .arg(&protected)
+        .output()
+        .unwrap();
+
+    // Restore permissions so the tempdir can be cleaned up.
+    fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_eq!(out.status.code(), Some(1), "exit code should be 1");
+    assert!(!writable.exists(), "writable sibling should be destroyed");
+    assert!(protected.exists(), "protected file should survive");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("1 destroyed") && stdout.contains("1 failed"),
+        "summary should report 1 destroyed, 1 failed: {stdout}"
+    );
 }
 
 #[cfg(unix)]

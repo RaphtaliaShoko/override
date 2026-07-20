@@ -25,7 +25,18 @@ const GUARD: &str = "OVERRIDE_MEMFD_REEXEC";
 /// On success this never returns (the process image is replaced). On failure,
 /// or if already re-executed, it returns and the caller continues normally.
 pub fn reexec_from_memfd(verbose: bool) {
-    if std::env::var_os(GUARD).is_some() {
+    // Two independent loop guards, so a single failure cannot cause an infinite
+    // re-exec (each iteration would allocate a fresh memfd):
+    //   1. the GUARD env var we set on the child (fast, no syscall), and
+    //   2. an env-independent check that our own image is already a memfd.
+    // The env var alone is not enough: a sandbox/CI that sanitizes the
+    // environment could strip it between the re-exec and the child's startup,
+    // and the child would then re-exec forever. The proc check below cannot be
+    // stripped, so it breaks the loop even if the env var is gone.
+    if std::env::var_os(GUARD).is_some() || running_from_memfd() {
+        if verbose {
+            eprintln!("[resilience] running from in-memory image");
+        }
         return; // Already running from the memfd copy.
     }
 
@@ -39,6 +50,25 @@ pub fn reexec_from_memfd(verbose: bool) {
             }
         }
     }
+}
+
+/// Are we already executing from an in-memory (memfd) image?
+///
+/// A process exec'd from a memfd via `fexecve` has its `/proc/self/exe` symlink
+/// point at a target like `/memfd:override (deleted)`. We match the `/memfd:`
+/// prefix specifically: a *normally* unlinked on-disk binary also reports the
+/// trailing `(deleted)`, so matching on that alone would be wrong.
+#[cfg(target_os = "linux")]
+fn running_from_memfd() -> bool {
+    match std::fs::read_link("/proc/self/exe") {
+        Ok(target) => target.to_string_lossy().starts_with("/memfd:"),
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn running_from_memfd() -> bool {
+    false
 }
 
 #[cfg(target_os = "linux")]
@@ -63,7 +93,8 @@ fn try_reexec() -> std::io::Result<()> {
             // Duplicate ownership handling: build a File that writes to the fd
             // without taking ownership of the OwnedFd we still need for exec.
             let raw = memfd.as_raw_fd();
-            let dup = nix::unistd::dup(raw).map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+            let dup =
+                nix::unistd::dup(raw).map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
             std::fs::File::from_raw_fd(dup.into_raw_fd())
         };
         f.write_all(&image)?;
@@ -72,18 +103,17 @@ fn try_reexec() -> std::io::Result<()> {
 
     // Rebuild argv and envp, adding the guard so the child does not re-exec.
     let argv: Vec<CString> = std::env::args_os()
-        .map(|a| CString::new(a.to_string_lossy().into_owned()).unwrap_or_else(|_| CString::new("").unwrap()))
+        .map(|a| {
+            CString::new(a.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| CString::new("").unwrap())
+        })
         .collect();
 
     let mut envp: Vec<CString> = std::env::vars_os()
         .filter(|(k, _)| k != GUARD)
         .map(|(k, v)| {
-            CString::new(format!(
-                "{}={}",
-                k.to_string_lossy(),
-                v.to_string_lossy()
-            ))
-            .unwrap_or_else(|_| CString::new("PLACEHOLDER=1").unwrap())
+            CString::new(format!("{}={}", k.to_string_lossy(), v.to_string_lossy()))
+                .unwrap_or_else(|_| CString::new("PLACEHOLDER=1").unwrap())
         })
         .collect();
     envp.push(CString::new(format!("{GUARD}=1")).unwrap());

@@ -85,6 +85,12 @@ pub struct Cli {
 
     /// File used as the source of "random" bytes for overwrite passes,
     /// read in a streaming, wrap-around fashion. Defaults to the OS CSPRNG.
+    ///
+    /// WARNING: a predictable or low-entropy source file weakens the overwrite
+    /// guarantee (the written bytes become guessable) and is NOT recommended for
+    /// serious security use -- prefer the default CSPRNG. Crypto-shredding still
+    /// applies regardless, but the random passes are only as unpredictable as
+    /// this source.
     #[arg(short, long, value_name = "PATH")]
     pub source: Option<PathBuf>,
 
@@ -127,8 +133,7 @@ mod tests {
 
     #[test]
     fn zero_counts_disable_phases() {
-        let cli =
-            Cli::try_parse_from(["override", "-e", "0", "-i", "0", "-n", "0", "f"]).unwrap();
+        let cli = Cli::try_parse_from(["override", "-e", "0", "-i", "0", "-n", "0", "f"]).unwrap();
         assert_eq!((cli.encryption, cli.iterations, cli.null), (0, 0, 0));
     }
 

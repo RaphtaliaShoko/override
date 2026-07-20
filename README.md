@@ -87,7 +87,7 @@ override [OPTIONS] <PATH>...
 | `-e` | `--encryption` | `N` | `1` | Encryption (crypto-shred) passes. `0` disables. |
 | `-i` | `--iterations` | `N` | `3` | Random-overwrite passes (applied in **each** of the two random rounds). `0` disables. |
 | `-n` | `--null` | `N` | `1` | Zero-fill passes. `0` disables. |
-| `-s` | `--source` | `PATH` | CSPRNG | File to use as the byte source for overwrites (streamed, wrapping). |
+| `-s` | `--source` | `PATH` | CSPRNG | File to use as the byte source for overwrites (streamed, wrapping). ⚠️ predictable sources weaken the overwrite passes — prefer the CSPRNG. |
 | `-u` | `--rename` | `N` | `1` | Random renames before deletion. `0` disables renaming (still deletes). |
 | `-o` | `--order` | `sequential\|batch` | `sequential` | Multi-file processing order. |
 | | `--no-stop` | — | off | Loop encrypt→random→null→random until interrupted, then rename+delete. |
@@ -177,7 +177,11 @@ immediate termination (exit code 130).
   well-reviewed primitive).
 - The key is wrapped in `zeroize::Zeroizing` / scrubbed with `.zeroize()`, and
   the working buffer is zeroized after each pass. **The key is never written to
-  disk, logged, or printed — not even under `--verbose`.**
+  disk, logged, or printed — not even under `--verbose`.** `zeroize` performs
+  **volatile writes with a compiler fence**, so the scrub is *not* elided even
+  under the release profile (`lto = true`, `opt-level = 3`) — that is precisely
+  why the crate is used instead of a plain assignment the optimizer could remove.
+  A unit test (`zeroize_actually_scrubs_key_material`) locks this contract.
 
 Once the key is gone the plaintext is already cryptographically inaccessible; the
 overwrite phases are defense-in-depth against implementation slips and metadata
@@ -193,6 +197,11 @@ leakage.
 - Random bytes come from the OS CSPRNG by default, or from a `--source` file
   read in a streaming, wrap-around fashion (loaded once, repeated to cover files
   of any size). An empty source file is rejected.
+  - ⚠️ **A custom `--source` is only as unpredictable as its contents.** A
+    predictable or low-entropy source file makes the written bytes guessable and
+    weakens the overwrite passes; it is **not recommended for serious security
+    use** — prefer the default CSPRNG. `--help` and a runtime stderr warning both
+    flag this. (Crypto-shredding still applies regardless of the source.)
 - Null passes write zero bytes.
 
 ---
@@ -214,16 +223,29 @@ it or stop it — including deliberately shredding its own binary.
 **Mechanism (Linux):** at startup, before touching any target, the process
 copies its own executable image (`/proc/self/exe`) into an anonymous,
 memory-backed file via `memfd_create(2)` and **re-executes itself from that
-memfd** with `fexecve(2)` (an `execveat` on the memfd with `AT_EMPTY_PATH`). A
-guard environment variable (`OVERRIDE_MEMFD_REEXEC`) prevents an infinite
-re-exec loop. After the re-exec the running image is backed entirely by the
-anonymous memfd, so unlinking, truncating, or overwriting the original on-disk
-file cannot unmap code pages or trigger `SIGBUS`.
+memfd** with `fexecve(2)` (an `execveat` on the memfd with `AT_EMPTY_PATH`).
+After the re-exec the running image is backed entirely by the anonymous memfd, so
+unlinking, truncating, or overwriting the original on-disk file cannot unmap code
+pages or trigger `SIGBUS`.
+
+**Loop guard (belt and suspenders).** Two independent checks stop the re-exec
+from recurring forever (each recursion would allocate a fresh memfd):
+
+1. a guard environment variable (`OVERRIDE_MEMFD_REEXEC`) set on the child — the
+   fast path, no syscall; and
+2. an **env-independent** check: after re-exec, `/proc/self/exe` resolves to a
+   `/memfd:…` target, which the process detects and refuses to re-exec on.
+
+The env var alone is not sufficient — a sandbox or CI that sanitizes the
+environment could strip it between the re-exec and the child's startup, and the
+child would then loop. The `/proc/self/exe` check cannot be stripped, so it
+breaks the loop even when the env var is gone. (Under `--verbose` the resident
+child logs `running from in-memory image`.)
 
 This is combined with the **static musl** build so there are also no shared
-objects to lose. The memfd step is **best-effort**: if it is unavailable it logs
-a note under `--verbose` and continues, relying on the static image already being
-resident.
+objects to lose. The memfd step is **best-effort and non-critical**: if it is
+unavailable it logs a note under `--verbose` and continues, relying on the static
+image already being resident — see the design note below.
 
 **Platform scope / limitations:** the memfd+`fexecve` path is Linux-only
 (`memfd_create` ≥ Linux 3.17, `execveat` ≥ 3.19). On non-Linux platforms the
@@ -292,7 +314,12 @@ physical destruction.
   the encryption phase truly overwrites the original blocks (important on HDDs)
   rather than reallocating via a temp-file rename.
 - **Self-resilience via memfd re-exec + static musl** (both, belt and
-  suspenders) rather than relying on page residency alone.
+  suspenders) rather than relying on page residency alone. The memfd re-exec is
+  **defense-in-depth, not a hard dependency**: it protects the *dynamically*
+  linked build and the case where `/proc/self/exe`'s path is unlinked mid-run,
+  but the static musl build alone already keeps its pages resident. A memfd
+  failure therefore **degrades gracefully** (logged under `--verbose`) instead of
+  breaking the tool — the re-exec is best-effort by design.
 - **Symlinks are always skipped** (never followed, never destroyed) for safety.
 - **Directories are not removed**, only the regular files inside them.
 - **Chunk size 1 MiB** for both encryption and overwrite I/O.
