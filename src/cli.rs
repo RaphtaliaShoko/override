@@ -37,7 +37,7 @@ pub enum Order {
         override -e 2 -i 3 -n 1 a.bin b.bin Two encryption, three random, one null pass\n  \
         override -i 0 -e 0 -n 3 log.txt     Null-only wipe (no encryption/random)\n  \
         override -s /dev/urandom big.img    Use an explicit byte source for overwrites\n  \
-        override --no-stop -u 5 target.dat  Loop forever, then 5 renames + delete on Ctrl-C\n  \
+        override --no-stop -u 5 target.dat  Emergency: encrypt+rename now, loop, delete on Ctrl-C\n  \
         override -o batch *.log             Batch order across many files\n  \
         override -p                         Type paths on stdin so they stay out of shell history\n\n\
         Note: on SSDs and copy-on-write filesystems (btrfs, ZFS, ...) logical\n\
@@ -88,7 +88,7 @@ pub struct Cli {
 
     /// Number of random-data overwrite passes (applied in BOTH random rounds).
     /// 0 disables random overwrite.
-    #[arg(short, long, value_name = "N", default_value_t = 3)]
+    #[arg(short, long, value_name = "N", default_value_t = 1)]
     pub iterations: u32,
 
     /// Number of zero-fill overwrite passes. 0 disables the null phase.
@@ -120,11 +120,22 @@ pub struct Cli {
     pub rename: u32,
 
     /// Processing order when multiple targets are given.
-    #[arg(short, long, value_enum, default_value_t = Order::Sequential)]
-    pub order: Order,
+    ///
+    /// Defaults to `sequential`, except under `--no-stop` where it defaults to
+    /// `batch` (so an early kill has crypto-shredded every file, not just the
+    /// first). Pass `-o sequential`/`-o batch` to force either regardless.
+    #[arg(short, long, value_enum)]
+    pub order: Option<Order>,
 
-    /// Loop encrypt->random->null->random indefinitely until interrupted,
-    /// then rename+delete. A second interrupt forces immediate exit.
+    /// Keep overwriting the targets until interrupted, then delete them.
+    ///
+    /// Intended for emergencies where you may NOT be able to press Ctrl-C: each
+    /// file is first crypto-shredded and renamed (encrypt -> rename), locking in
+    /// unreadable content and a hidden name up front, and only THEN looped over
+    /// random -> null -> random until an interrupt arrives, after which the file
+    /// is deleted. Defaults to batch order, so every target is crypto-shredded
+    /// before the lengthy looping begins. A second interrupt forces immediate
+    /// exit.
     #[arg(long)]
     pub no_stop: bool,
 
@@ -143,6 +154,21 @@ pub struct Cli {
     pub wipe_free: Option<PathBuf>,
 }
 
+impl Cli {
+    /// The processing order to actually use, applying the `--no-stop` default.
+    ///
+    /// When `--order` is not given explicitly, `--no-stop` runs in `Batch` order
+    /// (so an early kill has crypto-shredded every target, not just the first),
+    /// while a normal run stays `Sequential`.
+    pub fn resolved_order(&self) -> Order {
+        self.order.unwrap_or(if self.no_stop {
+            Order::Batch
+        } else {
+            Order::Sequential
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,10 +184,11 @@ mod tests {
     fn defaults_match_documented_pipeline() {
         let cli = Cli::try_parse_from(["override", "file.txt"]).unwrap();
         assert_eq!(cli.encryption, 1);
-        assert_eq!(cli.iterations, 3);
+        assert_eq!(cli.iterations, 1);
         assert_eq!(cli.null, 1);
         assert_eq!(cli.rename, 1);
-        assert_eq!(cli.order, Order::Sequential);
+        assert_eq!(cli.order, None);
+        assert_eq!(cli.resolved_order(), Order::Sequential);
         assert!(!cli.verbose && !cli.recursive && !cli.no_stop);
         assert!(!cli.dry_run && !cli.no_verify && cli.wipe_free.is_none());
         assert_eq!(cli.paths, vec![PathBuf::from("file.txt")]);
@@ -196,6 +223,25 @@ mod tests {
     #[test]
     fn requires_at_least_one_path() {
         assert!(Cli::try_parse_from(["override"]).is_err());
+    }
+
+    #[test]
+    fn no_stop_defaults_to_batch_but_order_is_overridable() {
+        // No --order given: a normal run is sequential, --no-stop is batch.
+        let plain = Cli::try_parse_from(["override", "f"]).unwrap();
+        assert_eq!(plain.order, None);
+        assert_eq!(plain.resolved_order(), Order::Sequential);
+
+        let ns = Cli::try_parse_from(["override", "--no-stop", "f"]).unwrap();
+        assert_eq!(ns.order, None);
+        assert_eq!(ns.resolved_order(), Order::Batch);
+
+        // An explicit --order always wins, even under --no-stop.
+        let ns_seq =
+            Cli::try_parse_from(["override", "--no-stop", "-o", "sequential", "f"]).unwrap();
+        assert_eq!(ns_seq.resolved_order(), Order::Sequential);
+        let batch = Cli::try_parse_from(["override", "-o", "batch", "f"]).unwrap();
+        assert_eq!(batch.resolved_order(), Order::Batch);
     }
 
     #[test]

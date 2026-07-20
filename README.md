@@ -120,11 +120,14 @@ override [OPTIONS] <PATH>...
 | | `--no-verify` | — | off | Skip read-back verification of the encryption pass (faster; not recommended for serious use — verification is on by default). |
 | `-s` | `--source` | `PATH` | CSPRNG | File to use as the byte source for overwrites (streamed, wrapping). ⚠️ predictable sources weaken the overwrite passes — prefer the CSPRNG. |
 | `-u` | `--rename` | `N` | `1` | Random renames before deletion. `0` disables renaming (still deletes). |
-| `-o` | `--order` | `sequential\|batch` | `sequential` | Multi-file processing order. |
-| | `--no-stop` | — | off | Loop encrypt→random→null→random until interrupted, then rename+delete. |
+| `-o` | `--order` | `sequential\|batch` | `sequential`¹ | Multi-file processing order. |
+| | `--no-stop` | — | off | Emergency loop: crypto-shred + rename every target up front, then loop random→null→random until interrupted, then delete. |
 | | `--wipe-free` | `PATH` | — | Wipe the **free space** of the filesystem containing `PATH` instead of destroying files. Cannot be combined with file targets. ⚠️ temporarily fills the volume to 100%. |
 | `-h` | `--help` | — | | Help. |
 | `-V` | `--version` | — | | Version. |
+
+¹ `--order` defaults to `sequential`, **except** under `--no-stop`, where it
+defaults to `batch` (an explicit `-o sequential`/`-o batch` always wins).
 
 A **progress bar with rate and ETA** is shown automatically for the destruction
 pipeline when stderr is an interactive terminal; it is suppressed under
@@ -139,7 +142,7 @@ override -v -r ./olddir                  # recursive, verbose
 override -e 2 -i 3 -n 1 a.bin b.bin      # 2 encryption, 3 random, 1 null pass
 override -i 0 -e 0 -n 3 log.txt          # null-only wipe
 override -s /dev/urandom big.img         # explicit byte source
-override --no-stop -u 5 target.dat       # loop; on Ctrl-C, 5 renames + delete
+override --no-stop -u 5 target.dat       # emergency: crypto-shred+rename now, loop, delete on Ctrl-C
 override -o batch *.log                  # batch order across many files
 override -p                              # type paths interactively (kept out of shell history)
 printf '%s\n' secret.txt >> ~/list; override -p < ~/list   # feed paths via stdin
@@ -161,9 +164,9 @@ override --wipe-free /mnt/scratch        # scrub free space of a volume
 For each target file, the **default** pipeline runs in this order:
 
 1. **Encryption** (`-e`, default 1) — crypto-shred.
-2. **Random overwrite, round A** (`-i`, default 3).
+2. **Random overwrite, round A** (`-i`, default 1).
 3. **Null overwrite** (`-n`, default 1).
-4. **Random overwrite, round B** (`-i`, default 3).
+4. **Random overwrite, round B** (`-i`, default 1).
 5. **Rename** (`-u`, default 1) to random name(s).
 6. **Delete** (unlink).
 
@@ -179,8 +182,8 @@ phase). This is stated in `--help` and is the behavior the tests assert.
 
 ### Default pass counts
 
-`encryption=1, iterations=3, null=1, rename=1, order=sequential`. With defaults a
-file undergoes: 1 encryption + 3 random + 1 null + 3 random + 1 rename + delete.
+`encryption=1, iterations=1, null=1, rename=1, order=sequential`. With defaults a
+file undergoes: 1 encryption + 1 random + 1 null + 1 random + 1 rename + delete.
 
 ### Order: sequential vs batch
 
@@ -190,13 +193,30 @@ file undergoes: 1 encryption + 3 random + 1 null + 3 random + 1 rename + delete.
   files, etc., finishing with rename+delete for all files. Useful so that no
   single file is fully processed before the others begin.
 
+`--order` defaults to `sequential`, except under `--no-stop` where it defaults to
+`batch` (see below); an explicit `-o` always wins.
+
 ### `--no-stop`
 
-Instead of running once, the encrypt→random→null→random cycle repeats forever on
-all targets. On the **first** SIGINT/SIGTERM the current write finishes safely
-(no half-written buffer), the loop stops, and the tool proceeds to rename+delete
-so the files are still properly destroyed. A **second** interrupt forces
-immediate termination (exit code 130).
+Built for an **emergency where you may not be able to press Ctrl-C** (the process
+could be killed or the machine powered off instead). The protections are ordered
+so that even a hard kill that never reaches the delete step still leaves the data
+unreadable and unidentifiable:
+
+1. **Encrypt (crypto-shred) every target** — content is unrecoverable once the
+   key is discarded.
+2. **Rename every target** to a random name — the original filename is gone.
+3. **Then loop** random→null→random over the targets until interrupted.
+4. On interrupt, **delete** the (already renamed) targets.
+
+Steps 1–2 run **once, up front**. Because `--no-stop` defaults to **batch** order,
+the encrypt pass covers *all* targets before the lengthy looping begins, so an
+early kill has crypto-shredded the whole set — not just the first file. (Pass
+`-o sequential` to encrypt+rename each file fully before the next instead.)
+
+On the **first** SIGINT/SIGTERM the current write finishes safely (no half-written
+buffer), the loop stops, and the tool proceeds to delete the targets. A **second**
+interrupt forces immediate termination (exit code 130).
 
 ---
 
@@ -415,7 +435,9 @@ physical destruction.
 ## Design decisions (where the spec left room for judgment)
 
 - **`--iterations` = N per round** (2 and 4 each get N passes), documented above.
-- **Default counts**: `-e 1 -i 3 -n 1 -u 1` (3 mirrors `shred`'s default).
+- **Default counts**: `-e 1 -i 1 -n 1 -u 1` — with crypto-shredding as the
+  primary defense, a single random pass suffices; raise `-i` for extra overwrite
+  rounds on magnetic media.
 - **In-place, same-length encryption** writing ciphertext-without-tag, chosen so
   the encryption phase truly overwrites the original blocks (important on HDDs)
   rather than reallocating via a temp-file rename.
