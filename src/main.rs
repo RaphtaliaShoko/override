@@ -2,8 +2,11 @@
 
 use clap::Parser;
 use override_tool::cli::Cli;
-use override_tool::pipeline::Runner;
-use override_tool::{resilience, signals};
+use override_tool::pipeline::{self, Runner};
+use override_tool::progress::Progress;
+use override_tool::{freespace, fswarn, resilience, signals};
+use std::collections::HashSet;
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -21,7 +24,13 @@ fn main() -> ExitCode {
     // write safely, then continue to rename+delete. Second signal aborts.
     signals::install();
 
-    let mut runner = match Runner::new(cli) {
+    // Free-space wiping is a distinct mode: it scrubs a volume's unused space
+    // rather than destroying named files.
+    if cli.wipe_free.is_some() {
+        return run_wipe_free(&cli);
+    }
+
+    let mut runner = match Runner::new(cli.clone()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("override: {e}");
@@ -31,14 +40,80 @@ fn main() -> ExitCode {
 
     let summary = runner.run();
 
-    println!(
-        "override: {} destroyed, {} failed",
-        summary.destroyed, summary.failed
-    );
+    if cli.dry_run {
+        println!(
+            "override: dry run: {} file(s) would be destroyed, {} failed",
+            summary.destroyed, summary.failed
+        );
+    } else {
+        println!(
+            "override: {} destroyed, {} failed",
+            summary.destroyed, summary.failed
+        );
+    }
 
     if summary.failed > 0 {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// Free-space wipe mode (`--wipe-free <DIR>`).
+fn run_wipe_free(cli: &Cli) -> ExitCode {
+    let dir = cli.wipe_free.as_ref().expect("wipe_free is Some");
+
+    // Warn about CoW/volatile filesystems where free-space wiping is unreliable.
+    let mut seen_fs = HashSet::new();
+    fswarn::warn_for_paths(std::slice::from_ref(dir), &mut seen_fs);
+
+    if cli.dry_run {
+        println!(
+            "would wipe free space of {} ({} random + {} null pass(es), then remove the fill file)",
+            dir.display(),
+            cli.iterations,
+            cli.null
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    let mut source = match pipeline::build_byte_source(&cli.source) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("override: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    eprintln!(
+        "override: wiping free space of {} -- this temporarily fills the volume to 100%",
+        dir.display()
+    );
+
+    // A byte spinner while filling (indeterminate total), unless verbose or
+    // non-interactive.
+    let show = std::io::stderr().is_terminal() && !cli.verbose;
+    let progress = Progress::spinner("wiping free space", show);
+
+    let result = freespace::wipe_free(
+        dir,
+        cli.iterations,
+        cli.null,
+        &mut source,
+        cli.verbose,
+        &progress,
+        None,
+    );
+    progress.finish();
+
+    match result {
+        Ok(()) => {
+            println!("override: free-space wipe of {} complete", dir.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("override: {}: {e}", dir.display());
+            ExitCode::from(1)
+        }
     }
 }

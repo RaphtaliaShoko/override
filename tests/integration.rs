@@ -282,6 +282,98 @@ fn permission_denied_on_one_target_still_destroys_others() {
     );
 }
 
+/// `--dry-run` previews the plan for every target but must not touch anything,
+/// and exits 0 when all targets are valid.
+#[test]
+fn dry_run_previews_without_touching_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+    write_file(&dir.path().join("a.txt"), b"alpha");
+    write_file(&sub.join("b.txt"), b"beta");
+
+    let out = Command::new(bin())
+        .args(["--dry-run", "-r"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "dry run should exit 0");
+    // Nothing removed.
+    assert_eq!(count_files(dir.path()), 2, "dry run must not delete files");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("would destroy:") && stdout.contains("delete"),
+        "dry run should describe the plan: {stdout}"
+    );
+    assert!(
+        stdout.contains("2 file(s) would be destroyed"),
+        "dry run summary: {stdout}"
+    );
+}
+
+/// A missing target under `--dry-run` still reports failure and exits 1, exactly
+/// like a real run would.
+#[test]
+fn dry_run_missing_target_exits_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = dir.path().join("good.txt");
+    write_file(&good, b"data");
+    let missing = dir.path().join("nope");
+
+    let out = Command::new(bin())
+        .arg("--dry-run")
+        .arg(&good)
+        .arg(&missing)
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(1), "missing target -> exit 1");
+    assert!(good.exists(), "dry run must not delete the valid file");
+}
+
+/// `--no-verify` disables read-back verification but still destroys the target.
+#[test]
+fn no_verify_still_destroys() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("secret.bin");
+    write_file(&f, &vec![0x33u8; 40_000]);
+
+    let status = Command::new(bin())
+        .arg("--no-verify")
+        .arg(&f)
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert!(!f.exists(), "file should be destroyed with --no-verify");
+}
+
+/// `--wipe-free --dry-run` describes the free-space wipe without creating a fill
+/// file or touching the directory's contents.
+#[test]
+fn wipe_free_dry_run_describes_without_filling() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(&dir.path().join("keep.txt"), b"unrelated");
+
+    let out = Command::new(bin())
+        .args(["--wipe-free"])
+        .arg(dir.path())
+        .arg("--dry-run")
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    // Only the pre-existing file remains; no fill file created.
+    assert_eq!(count_files(dir.path()), 1);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("would wipe free space"),
+        "wipe-free dry run output: {stdout}"
+    );
+}
+
 #[cfg(unix)]
 fn send_sigint(pid: u32) {
     unsafe {

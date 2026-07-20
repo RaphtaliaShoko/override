@@ -21,7 +21,15 @@ pub enum Fill<'a> {
 ///
 /// Real `write` syscalls are issued per chunk, which the compiler cannot
 /// optimize away, and `sync_all` forces the data past the page cache.
-pub fn overwrite_pass(file: &mut File, len: u64, fill: &mut Fill) -> io::Result<()> {
+///
+/// `on_chunk` is called with the byte count of each chunk as it is written, so
+/// callers can drive a progress bar without this module depending on one.
+pub fn overwrite_pass(
+    file: &mut File,
+    len: u64,
+    fill: &mut Fill,
+    on_chunk: &mut dyn FnMut(u64),
+) -> io::Result<()> {
     let mut buf = vec![0u8; CHUNK];
     file.seek(SeekFrom::Start(0))?;
 
@@ -38,6 +46,7 @@ pub fn overwrite_pass(file: &mut File, len: u64, fill: &mut Fill) -> io::Result<
         }
         file.write_all(&buf[..this])?;
         written += this as u64;
+        on_chunk(this as u64);
 
         // Graceful interrupt: stop after completing the current chunk write.
         if signals::interrupted() {
@@ -47,6 +56,21 @@ pub fn overwrite_pass(file: &mut File, len: u64, fill: &mut Fill) -> io::Result<
     file.flush()?;
     file.sync_all()?;
     Ok(())
+}
+
+/// Fsync the directory that contains `path`, so a rename/unlink of an entry in
+/// it is durably persisted (on crash-recovery, the directory entry is gone).
+///
+/// This is best-effort at the call site: the removal itself has already
+/// happened by the time we get here; this only hardens the metadata's
+/// durability. Returns an error if the parent cannot be opened or synced.
+pub fn fsync_parent_dir(path: &Path) -> io::Result<()> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let dir = parent.unwrap_or_else(|| Path::new("."));
+    // Opening a directory read-only and calling fsync on it flushes its entries
+    // on Linux/Unix.
+    let f = File::open(dir)?;
+    f.sync_all()
 }
 
 /// Generate a random file name of `len` hex-ish characters.
@@ -143,7 +167,7 @@ mod tests {
             .write(true)
             .open(tmp.path())
             .unwrap();
-        overwrite_pass(&mut f, 4096, &mut Fill::Null).unwrap();
+        overwrite_pass(&mut f, 4096, &mut Fill::Null, &mut |_| {}).unwrap();
 
         assert_eq!(read_all(tmp.path()), vec![0u8; 4096]);
     }
@@ -161,11 +185,25 @@ mod tests {
             .open(tmp.path())
             .unwrap();
         let mut src = ByteSource::csprng();
-        overwrite_pass(&mut f, 4096, &mut Fill::Random(&mut src)).unwrap();
+        let mut counted: u64 = 0;
+        overwrite_pass(&mut f, 4096, &mut Fill::Random(&mut src), &mut |n| {
+            counted += n
+        })
+        .unwrap();
 
         let after = read_all(tmp.path());
         assert_eq!(after.len(), 4096);
         assert_ne!(after, orig);
+        assert_eq!(counted, 4096, "callback should tally every byte");
+    }
+
+    #[test]
+    fn fsync_parent_dir_succeeds_for_normal_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        std::fs::write(&p, b"x").unwrap();
+        // Syncing the parent of an existing file must succeed.
+        fsync_parent_dir(&p).unwrap();
     }
 
     #[test]

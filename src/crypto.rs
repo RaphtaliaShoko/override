@@ -34,7 +34,23 @@ fn nonce_from_index(index: u64) -> Nonce {
 ///
 /// The key is generated here, used, and zeroized before returning. It is never
 /// returned, logged, or written anywhere.
-pub fn encrypt_pass(file: &mut File, len: u64) -> io::Result<()> {
+///
+/// When `verify` is set, each ciphertext chunk is read back from the file and
+/// compared against what we just wrote *before* moving on. This is a
+/// page-cache-level read-back (distinct from the end-of-pass `sync_all`): it
+/// catches a silent short write or filesystem/logic error, so a chunk that did
+/// not actually land is reported as a failure rather than being treated as a
+/// completed crypto-shred. On mismatch the pass returns an error.
+///
+/// `on_chunk` is invoked with the number of plaintext bytes processed for each
+/// chunk, so callers can drive a progress bar without this module knowing about
+/// one.
+pub fn encrypt_pass(
+    file: &mut File,
+    len: u64,
+    verify: bool,
+    on_chunk: &mut dyn FnMut(u64),
+) -> io::Result<()> {
     // Fresh 256-bit key from the OS CSPRNG, held in a zeroizing buffer.
     let mut key = [0u8; 32];
     OsRng.fill_bytes(&mut key);
@@ -45,6 +61,9 @@ pub fn encrypt_pass(file: &mut File, len: u64) -> io::Result<()> {
     key.zeroize();
 
     let mut buf = vec![0u8; CHUNK];
+    // Scratch buffer used only for read-back verification; holds ciphertext
+    // briefly, so it is scrubbed alongside `buf` at the end.
+    let mut check = if verify { vec![0u8; CHUNK] } else { Vec::new() };
     let mut offset: u64 = 0;
     let mut index: u64 = 0;
 
@@ -64,8 +83,21 @@ pub fn encrypt_pass(file: &mut File, len: u64) -> io::Result<()> {
             file.seek(SeekFrom::Start(offset))?;
             file.write_all(&buf[..this])?;
 
+            if verify {
+                // Read the bytes back and confirm the write landed intact.
+                file.seek(SeekFrom::Start(offset))?;
+                file.read_exact(&mut check[..this])?;
+                if check[..this] != buf[..this] {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("ciphertext verification failed at offset {offset}"),
+                    ));
+                }
+            }
+
             offset += this as u64;
             index += 1;
+            on_chunk(this as u64);
 
             // A graceful interrupt lets the current (already-written) chunk
             // stand and stops the pass; the file remains fully overwritten up
@@ -79,8 +111,9 @@ pub fn encrypt_pass(file: &mut File, len: u64) -> io::Result<()> {
         Ok(())
     })();
 
-    // Best-effort scrub of any plaintext lingering in the working buffer.
+    // Best-effort scrub of any plaintext/ciphertext lingering in the buffers.
     buf.zeroize();
+    check.zeroize();
     // `cipher` (holding the key) is dropped here; the chacha20poly1305 crate
     // zeroizes its internal key material on drop.
     drop(cipher);
@@ -105,7 +138,7 @@ mod tests {
             .write(true)
             .open(tmp.path())
             .unwrap();
-        encrypt_pass(&mut file, plaintext.len() as u64).unwrap();
+        encrypt_pass(&mut file, plaintext.len() as u64, true, &mut |_| {}).unwrap();
 
         let mut after = Vec::new();
         file.seek(SeekFrom::Start(0)).unwrap();
@@ -115,6 +148,27 @@ mod tests {
         assert_eq!(after.len(), plaintext.len());
         // ...but the plaintext is gone.
         assert_ne!(after, plaintext);
+    }
+
+    #[test]
+    fn verify_counts_every_byte_via_callback() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        // Two full chunks + a partial one, to exercise the chunk loop.
+        let total = crate::CHUNK * 2 + 123;
+        tmp.write_all(&vec![0x11u8; total]).unwrap();
+        tmp.flush().unwrap();
+
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp.path())
+            .unwrap();
+
+        let mut counted: u64 = 0;
+        encrypt_pass(&mut file, total as u64, true, &mut |n| counted += n).unwrap();
+        // The read-back verification passed (no error) and the callback saw the
+        // whole file.
+        assert_eq!(counted, total as u64);
     }
 
     #[test]
@@ -140,7 +194,7 @@ mod tests {
             .open(tmp.path())
             .unwrap();
         // Must not panic or error on a zero-length file.
-        encrypt_pass(&mut file, 0).unwrap();
+        encrypt_pass(&mut file, 0, true, &mut |_| {}).unwrap();
         assert_eq!(file.metadata().unwrap().len(), 0);
     }
 }

@@ -50,7 +50,10 @@ pub struct Cli {
     /// destroyed files remain visible afterwards. Use `--prompt` to type paths
     /// interactively instead (they are read from stdin and never appear as
     /// arguments).
-    #[arg(value_name = "PATH", required_unless_present = "prompt")]
+    #[arg(
+        value_name = "PATH",
+        required_unless_present_any = ["prompt", "wipe_free"]
+    )]
     pub paths: Vec<PathBuf>,
 
     /// Read one or more target paths interactively from stdin instead of (or in
@@ -65,6 +68,15 @@ pub struct Cli {
     /// Print detailed progress for every file, phase and pass.
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Show what would be destroyed without touching anything.
+    ///
+    /// Walks the targets exactly like a real run (honoring --recursive and the
+    /// symlink-skip rules) and prints the pipeline that would be applied to each
+    /// file, but opens nothing for writing. A missing/invalid target is still
+    /// reported and still yields a non-zero exit, matching a real run.
+    #[arg(long)]
+    pub dry_run: bool,
 
     /// Recurse into directories and process every file inside.
     #[arg(short, long)]
@@ -82,6 +94,15 @@ pub struct Cli {
     /// Number of zero-fill overwrite passes. 0 disables the null phase.
     #[arg(short, long, value_name = "N", default_value_t = 1)]
     pub null: u32,
+
+    /// Skip read-back verification of the encryption (crypto-shred) pass.
+    ///
+    /// By default each encrypted chunk is read back and compared before moving
+    /// on, so a silent bad write is caught instead of being mistaken for a
+    /// completed crypto-shred. This flag disables that check for speed; not
+    /// recommended for serious security use.
+    #[arg(long)]
+    pub no_verify: bool,
 
     /// File used as the source of "random" bytes for overwrite passes,
     /// read in a streaming, wrap-around fashion. Defaults to the OS CSPRNG.
@@ -106,6 +127,20 @@ pub struct Cli {
     /// then rename+delete. A second interrupt forces immediate exit.
     #[arg(long)]
     pub no_stop: bool,
+
+    /// Wipe the FREE space of the filesystem containing the given directory,
+    /// instead of destroying files.
+    ///
+    /// Fills the volume's unused space with random data (then zeros, per --null)
+    /// so remnants of files deleted BEFORE override ran cannot be recovered, then
+    /// removes the fill file. The random/null pass counts (-i / -n) and --source
+    /// apply. This does NOT scrub slack inside still-allocated blocks and is
+    /// ineffective on copy-on-write/SSD-remapped storage. It temporarily fills
+    /// the volume to 100%; do not point it at a system/root filesystem.
+    ///
+    /// Cannot be combined with file targets.
+    #[arg(long, value_name = "PATH", conflicts_with = "paths")]
+    pub wipe_free: Option<PathBuf>,
 }
 
 #[cfg(test)]
@@ -128,7 +163,28 @@ mod tests {
         assert_eq!(cli.rename, 1);
         assert_eq!(cli.order, Order::Sequential);
         assert!(!cli.verbose && !cli.recursive && !cli.no_stop);
+        assert!(!cli.dry_run && !cli.no_verify && cli.wipe_free.is_none());
         assert_eq!(cli.paths, vec![PathBuf::from("file.txt")]);
+    }
+
+    #[test]
+    fn dry_run_and_no_verify_parse() {
+        let cli = Cli::try_parse_from(["override", "--dry-run", "--no-verify", "f"]).unwrap();
+        assert!(cli.dry_run);
+        assert!(cli.no_verify);
+    }
+
+    #[test]
+    fn wipe_free_makes_paths_optional() {
+        // --wipe-free supplies the target, so no positional path is required.
+        let cli = Cli::try_parse_from(["override", "--wipe-free", "/mnt/scratch"]).unwrap();
+        assert_eq!(cli.wipe_free, Some(PathBuf::from("/mnt/scratch")));
+        assert!(cli.paths.is_empty());
+    }
+
+    #[test]
+    fn wipe_free_conflicts_with_positional_paths() {
+        assert!(Cli::try_parse_from(["override", "--wipe-free", "/mnt", "file.txt"]).is_err());
     }
 
     #[test]

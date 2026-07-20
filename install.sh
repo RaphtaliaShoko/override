@@ -6,19 +6,26 @@
 # The binary for the host architecture is downloaded from:
 #   https://github.com/RaphtaliaShoko/override/releases/download/<VERSION>/override-<ARCH>-linux
 #
+# Its integrity is then verified against BOTH the SHA256 and SHA512 digests
+# published in the release's "checksums" asset before it is installed.
+#
 # Supported architectures: x86_64, aarch64 (Linux only).
 #
 # Usage:
-#   ./install.sh [--version <vX.Y.Z>] [--prefix <dir>] [--dry]
+#   ./install.sh [--version <vX.Y.Z>] [--prefix <dir>] [--dry] [--no-checksum]
 #   ./install.sh --remove [--prefix <dir>] [--dry]
 #   ./install.sh --help
 #
 # Behaviour:
 #   * Default action installs (or, if already present, updates) override to the
 #     requested version — running it again is how you upgrade/downgrade.
+#   * The download is verified against the published SHA256 AND SHA512 checksums;
+#     a mismatch (or a missing checksums asset) aborts the install.
+#   * --no-checksum skips that verification (e.g. for older releases published
+#     without a checksums file) — not recommended.
 #   * --remove uninstalls it.
-#   * --dry prints exactly what would happen (and checks the download URL is
-#     reachable) without touching the system.
+#   * --dry prints exactly what would happen (and checks the download URL and the
+#     checksums asset are reachable) without touching the system.
 #
 # The default install prefix is /usr/local/bin; sudo is used automatically only
 # when the target directory is not writable by the current user.
@@ -29,6 +36,7 @@ set -euo pipefail
 
 REPO="RaphtaliaShoko/override"
 BIN_NAME="override"
+CHECKSUMS_NAME="checksums"
 DEFAULT_VERSION="v1.0.0"
 DEFAULT_PREFIX="/usr/local/bin"
 
@@ -36,6 +44,7 @@ VERSION="$DEFAULT_VERSION"
 INSTALL_DIR="$DEFAULT_PREFIX"
 ACTION="install"
 DRY=0
+VERIFY_CHECKSUM=1
 SUDO=""
 
 # ---- logging ---------------------------------------------------------------
@@ -125,6 +134,74 @@ asset_url() {
         "$REPO" "$VERSION" "$BIN_NAME" "$1"
 }
 
+checksums_url() {
+    printf 'https://github.com/%s/releases/download/%s/%s\n' \
+        "$REPO" "$VERSION" "$CHECKSUMS_NAME"
+}
+
+# Print the lowercase hex digest of a file. $1 = bits (256|512), $2 = file.
+# Tries sha256sum/sha512sum, then shasum -a, then openssl dgst. Returns non-zero
+# if no tool is available.
+sha_of() {
+    local bits="$1" file="$2"
+    if have "sha${bits}sum"; then
+        "sha${bits}sum" "$file" | awk '{print $1}'
+    elif have shasum; then
+        shasum -a "$bits" "$file" | awk '{print $1}'
+    elif have openssl; then
+        openssl dgst "-sha${bits}" "$file" | awk '{print $NF}'
+    else
+        return 3
+    fi
+}
+
+# Verify $1 (a downloaded binary) against the published SHA256 and SHA512 digests
+# for architecture $2. Aborts on any mismatch, a missing entry, or an
+# unreachable/absent checksums asset (fail closed).
+#
+# The published "checksums" asset holds both digests in coreutils format
+# (`<hash>  <filename>`); SHA256 lines have a 64-char hex hash and SHA512 lines a
+# 128-char one, so we select each by hash length and asset filename.
+verify_checksums() {
+    local file="$1" arch="$2"
+    local asset url tmpc exp256 exp512 act256 act512
+    asset="$BIN_NAME-$arch-linux"
+    url="$(checksums_url)"
+
+    info "verifying checksums (SHA256 + SHA512)…"
+    tmpc="$(mktemp)"
+    if ! download "$url" "$tmpc"; then
+        rm -f "$tmpc"
+        die "could not download the checksums asset from $url
+Pass --no-checksum to skip verification (e.g. for a release published without one)."
+    fi
+
+    exp256="$(awk -v f="$asset" 'length($1)==64  && $2==f {print $1; exit}' "$tmpc")"
+    exp512="$(awk -v f="$asset" 'length($1)==128 && $2==f {print $1; exit}' "$tmpc")"
+    rm -f "$tmpc"
+
+    [ -n "$exp256" ] || die "no SHA256 entry for '$asset' in the checksums asset"
+    [ -n "$exp512" ] || die "no SHA512 entry for '$asset' in the checksums asset"
+
+    act256="$(sha_of 256 "$file")" \
+        || die "cannot compute SHA256 (need sha256sum, shasum, or openssl)"
+    act512="$(sha_of 512 "$file")" \
+        || die "cannot compute SHA512 (need sha512sum, shasum, or openssl)"
+
+    if [ "$act256" != "$exp256" ]; then
+        die "SHA256 mismatch for $asset — download may be corrupt or tampered with; aborting.
+  expected: $exp256
+  actual:   $act256"
+    fi
+    if [ "$act512" != "$exp512" ]; then
+        die "SHA512 mismatch for $asset — download may be corrupt or tampered with; aborting.
+  expected: $exp512
+  actual:   $act512"
+    fi
+
+    ok "checksums verified (SHA256 + SHA512)"
+}
+
 # ---- actions ---------------------------------------------------------------
 
 do_install() {
@@ -144,13 +221,30 @@ do_install() {
     info "source       : $url"
     info "destination  : $dest${SUDO:+  (via sudo)}"
 
+    if [ "$VERIFY_CHECKSUM" -eq 1 ]; then
+        info "checksums    : $(checksums_url)"
+    else
+        warn "checksum verification disabled (--no-checksum)"
+    fi
+
     if [ "$DRY" -eq 1 ]; then
         if url_reachable "$url"; then
             ok "[dry] release asset is reachable"
         else
             warn "[dry] release asset is NOT reachable — check the --version tag"
         fi
-        info "[dry] would download and install to $dest; no changes made"
+        if [ "$VERIFY_CHECKSUM" -eq 1 ]; then
+            if url_reachable "$(checksums_url)"; then
+                ok "[dry] checksums asset is reachable"
+            else
+                warn "[dry] checksums asset is NOT reachable — install would abort (or use --no-checksum)"
+            fi
+        fi
+        if [ "$VERIFY_CHECKSUM" -eq 1 ]; then
+            info "[dry] would download, verify checksums, and install to $dest; no changes made"
+        else
+            info "[dry] would download and install to $dest (checksum verification skipped); no changes made"
+        fi
         return 0
     fi
 
@@ -158,6 +252,12 @@ do_install() {
     trap 'rm -rf "$tmp"' RETURN
     info "downloading…"
     download "$url" "$tmp/$BIN_NAME"
+
+    # Verify integrity against the published SHA256 + SHA512 digests before the
+    # binary is ever made executable or installed.
+    if [ "$VERIFY_CHECKSUM" -eq 1 ]; then
+        verify_checksums "$tmp/$BIN_NAME" "$arch"
+    fi
 
     # Basic sanity: make sure we got an ELF binary, not an HTML error page.
     if ! head -c 4 "$tmp/$BIN_NAME" | grep -q $'\x7fELF'; then
@@ -203,6 +303,7 @@ while [ $# -gt 0 ]; do
         --prefix=*)      INSTALL_DIR="${1#*=}"; shift ;;
         --remove | --uninstall) ACTION="remove"; shift ;;
         --dry | --dry-run)      DRY=1; shift ;;
+        --no-checksum | --skip-checksum) VERIFY_CHECKSUM=0; shift ;;
         -h | --help)     usage; exit 0 ;;
         *) err "unknown option: $1"; echo; usage; exit 2 ;;
     esac

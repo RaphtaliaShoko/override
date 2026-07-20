@@ -5,8 +5,11 @@
 
 pub mod cli;
 pub mod crypto;
+pub mod freespace;
+pub mod fswarn;
 pub mod overwrite;
 pub mod pipeline;
+pub mod progress;
 pub mod resilience;
 pub mod signals;
 pub mod source;
