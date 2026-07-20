@@ -373,10 +373,15 @@ objects to lose. The memfd step is **best-effort and non-critical**: if it is
 unavailable it logs a note under `--verbose` and continues, relying on the static
 image already being resident — see the design note below.
 
-**Platform scope / limitations:** the memfd+`fexecve` path is Linux-only
-(`memfd_create` ≥ Linux 3.17, `execveat` ≥ 3.19). On non-Linux platforms the
-re-exec step is skipped; use a static build for equivalent robustness where the
-OS keeps mapped executable pages resident after unlink. The tool targets Linux.
+**Platform scope / limitations:** the in-memory re-exec is implemented on
+**Linux** (`memfd_create` ≥ Linux 3.17, `execveat` ≥ 3.19) and on **FreeBSD**
+(the equivalent `shm_open(SHM_ANON)` + `fexecve`, with the executable path
+resolved through the `kern.proc.pathname` sysctl). On every other platform
+(OpenBSD, DragonFly, NetBSD, macOS, …) the re-exec step is a graceful no-op:
+build statically so the OS keeps mapped executable pages resident after unlink.
+Linux is the primary, fully-tested target; the FreeBSD path compiles for
+`x86_64-unknown-freebsd` but the integration test that exercises self-shredding
+runs on Linux. The `install.sh` release installer remains Linux-only.
 
 An automated integration test (`self_resilience_shreds_own_binary`) copies the
 binary into a temp dir, runs it against dummy files **plus its own copy**, and
