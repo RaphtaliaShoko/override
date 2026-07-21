@@ -1,5 +1,5 @@
 Name:           override-tool
-Version:        1.2.0
+Version:        1.2.1
 Release:        1%{?dist}
 Summary:        Secure file-destruction tool (shred-like) with crypto-shredding
 
@@ -65,6 +65,13 @@ cargo test --release --locked || :
 %{_datadir}/bash-completion/completions/override
 
 %changelog
+* Tue Jul 21 2026 RaphtaliaShoko <raphael.canevet@pm.me> - 1.2.1-1
+- Security-audit fixes: correct the crypto-shred guarantee on CoW/SSD storage
+  (docs + runtime warning), preserve non-UTF-8 target paths through the
+  self-resilience re-exec, stream --source with bounded memory, warn on
+  hard-linked targets, set PR_SET_DUMPABLE(0), and guard --wipe-free on the
+  root filesystem.
+
 * Tue Jul 21 2026 RaphtaliaShoko <raphael.canevet@pm.me> - 1.2.0-1
 - Release 1.2.0.
 

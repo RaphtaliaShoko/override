@@ -77,8 +77,8 @@ two secrets above need to be added.
 
 ```sh
 # bump Cargo.toml version, commit, then:
-git tag v1.2.0
-git push origin v1.2.0
+git tag v1.2.1
+git push origin v1.2.1
 ```
 
 The workflow builds, signs, and publishes automatically. To rehearse the build

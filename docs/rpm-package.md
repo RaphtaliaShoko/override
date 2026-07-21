@@ -33,9 +33,9 @@ the resulting `.rpm` back into `dist/`.
 ## Installing and removing
 
 ```sh
-sudo dnf install ./dist/override-tool-1.2.0-1.fc44.x86_64.rpm   # resolves deps
+sudo dnf install ./dist/override-tool-1.2.1-1.fc44.x86_64.rpm   # resolves deps
 # or:
-sudo rpm -i ./dist/override-tool-1.2.0-1.fc44.x86_64.rpm
+sudo rpm -i ./dist/override-tool-1.2.1-1.fc44.x86_64.rpm
 
 sudo dnf remove override-tool                                   # uninstall
 ```

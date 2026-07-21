@@ -1,3 +1,13 @@
+override-tool (1.2.1-1) unstable; urgency=medium
+
+  * Security-audit fixes: correct the crypto-shred guarantee on CoW/SSD storage
+    (docs + runtime warning), preserve non-UTF-8 target paths through the
+    self-resilience re-exec, stream --source with bounded memory, warn on
+    hard-linked targets, set PR_SET_DUMPABLE(0), and guard --wipe-free on the
+    root filesystem.
+
+ -- RaphtaliaShoko <raphael.canevet@pm.me>  Tue, 21 Jul 2026 12:00:00 +0000
+
 override-tool (1.2.0-1) unstable; urgency=medium
 
   * Release 1.2.0.
