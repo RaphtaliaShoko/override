@@ -52,6 +52,16 @@ sudo apt install ./dist/override-tool_1.1.0-1_amd64.deb
 
 Details → **[docs/debian-package.md](docs/debian-package.md)**.
 
+On Fedora/RHEL/openSUSE you can build a native **`.rpm`** the same way (run on an
+RPM host with `rpmbuild`/`cargo`):
+
+```sh
+./packaging/build-rpm.sh                            # → dist/override-tool-<ver>-<rel>.<arch>.rpm
+sudo dnf install ./dist/override-tool-1.1.0-1.fc44.x86_64.rpm
+```
+
+Details → **[docs/rpm-package.md](docs/rpm-package.md)**.
+
 ## Build
 
 Requires a Rust toolchain (tested with Rust 1.97).
@@ -161,6 +171,7 @@ Full model, invariants, and threat notes → **[docs/security.md](docs/security.
 | [security.md](docs/security.md) | Security model, invariants, error handling, exit codes |
 | [installer.md](docs/installer.md) | `install.sh` options and the signature-verification model |
 | [debian-package.md](docs/debian-package.md) | Building and installing the `.deb` package |
+| [rpm-package.md](docs/rpm-package.md) | Building and installing the `.rpm` package |
 | [design.md](docs/design.md) | Design decisions where the spec left room for judgment |
 | [faq.md](docs/faq.md) | Short answers to common questions |
 

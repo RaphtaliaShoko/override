@@ -76,6 +76,7 @@ self-distributed package.
 
 - **`.deb`** — you are on a Debian/Ubuntu system, want `apt`/`dpkg` integration
   (clean upgrades/removal, a man page, completion), and are building from source.
+- **[`.rpm`](rpm-package.md)** — the equivalent for Fedora/RHEL/openSUSE.
 - **[`install.sh`](installer.md)** — you want the prebuilt, **cryptographically
   signed** release binary from GitHub without a Rust toolchain, on any Linux
   distribution.
