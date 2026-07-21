@@ -2,13 +2,22 @@
 
 `override` is a command-line tool (written in Rust) that securely destroys files
 and directories so their content cannot be recovered. It is inspired by GNU
-`shred`, but leads with **crypto-shredding** — encrypt in place with a fresh key,
-then discard the key — so the plaintext is cryptographically unrecoverable even
-on SSDs and copy-on-write filesystems where physical overwriting cannot be
-guaranteed.
+`shred` and layers several defenses: **crypto-shredding** (encrypt in place with
+a fresh key, then discard the key), multi-pass random/null overwrites, renaming,
+and deletion.
 
 > ⚠️ **This tool permanently destroys data.** There is no undo. Test on
 > disposable files first.
+
+> ⚠️ **Storage caveat (read this).** Because the file already exists as
+> plaintext on disk, crypto-shredding only assures destruction where writing
+> the ciphertext back *physically overwrites* the original blocks — exactly the
+> same requirement as the overwrite passes. On SSDs and copy-on-write
+> filesystems (btrfs, ZFS, snapshots) a write can be redirected to new blocks,
+> leaving the original plaintext intact regardless of the discarded key.
+> `override` is **not** a substitute for full-disk encryption, ATA/NVMe
+> secure-erase, or physical destruction on such media. See
+> [docs/filesystems.md](docs/filesystems.md).
 
 ## Features
 
@@ -100,7 +109,8 @@ override [OPTIONS] <PATH>...
 | `-u` | `--rename` | `N` | `1` | Random renames before deletion. `0` disables renaming (still deletes). |
 | `-o` | `--order` | `sequential\|batch` | `sequential`¹ | Multi-file processing order. |
 | | `--no-stop` | — | off | Emergency loop: crypto-shred + rename every target up front, then loop random→null→random until interrupted, then delete. |
-| | `--wipe-free` | `PATH` | — | Wipe the **free space** of the filesystem containing `PATH` instead of destroying files. Cannot be combined with file targets. ⚠️ temporarily fills the volume to 100%. |
+| | `--wipe-free` | `PATH` | — | Wipe the **free space** of the filesystem containing `PATH` instead of destroying files. Cannot be combined with file targets. ⚠️ temporarily fills the volume to 100%; **refused on the root/system FS** unless `--force`. As non-root on ext, ~5% reserved blocks are left un-wiped. |
+| | `--force` | — | off | Override safety guards (currently: allow `--wipe-free` on the root/system filesystem). |
 | `-h` | `--help` | — | | Help. |
 | `-V` | `--version` | — | | Version. |
 
@@ -140,15 +150,20 @@ override --wipe-free /mnt/scratch        # scrub free space of a volume
 
 ## Security notes
 
-- **Crypto-shredding is the primary guarantee.** Once the random key is
-  discarded the plaintext is cryptographically unrecoverable, *regardless* of
-  where the ciphertext physically lives. The overwrite/rename/delete phases are
-  defense-in-depth.
-- ⚠️ **Overwriting alone cannot promise physical erasure** on SSDs, copy-on-write
-  filesystems (btrfs, ZFS, snapshots), or journaled/RAID/network storage —
-  `override` warns you at runtime when it detects such a filesystem. For
-  whole-disk guarantees prefer full-disk encryption, ATA/NVMe secure-erase, or
-  physical destruction. Details → [docs/filesystems.md](docs/filesystems.md).
+- **Crypto-shredding is one defense-in-depth layer, not a physical-storage
+  bypass.** Once the fresh key is discarded the *ciphertext* is unrecoverable —
+  but the tool encrypts data that already exists as plaintext on disk, so this
+  only assures destruction when the ciphertext write physically overwrites the
+  original plaintext blocks. Where a logical overwrite reaches the same physical
+  block (ext4/xfs on non-remapped media) it is effective; where it does not
+  (below), it has the same limitation as the overwrite passes.
+- ⚠️ **No in-place method — crypto-shred or overwrite — promises physical
+  erasure** on SSDs, copy-on-write filesystems (btrfs, ZFS, snapshots), or
+  journaled/RAID/network storage: a write can be redirected to new blocks,
+  leaving the original plaintext intact. `override` warns you at runtime when it
+  detects such a filesystem. For real guarantees there, prefer full-disk
+  encryption from the start, ATA/NVMe secure-erase, or physical destruction.
+  Details → [docs/filesystems.md](docs/filesystems.md).
 - **Secrets never leave memory** — keys, nonces, and buffers are never logged,
   printed, or written to disk (not even under `--verbose`), and keys are zeroized
   immediately after use.

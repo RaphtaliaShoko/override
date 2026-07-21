@@ -25,8 +25,9 @@ every write.
 
 It also supports multi-pass and custom pipelines, free-space wiping, an
 emergency "no-stop" mode, and self-resilience features. Note that on SSDs and
-copy-on-write filesystems, logical overwrites may not reach the original
-physical blocks; crypto-shredding is the primary defense there.
+copy-on-write filesystems, no in-place method -- neither the overwrites nor the
+crypto-shred -- is guaranteed to reach the original physical blocks; there,
+prefer full-disk encryption, ATA/NVMe secure-erase, or physical destruction.
 
 %prep
 %autosetup -n %{name}-%{version}

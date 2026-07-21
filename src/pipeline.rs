@@ -25,7 +25,55 @@ pub struct Target {
 pub struct Summary {
     pub destroyed: usize,
     pub failed: usize,
+    /// Number of distinct filesystems among the targets where destruction could
+    /// not be assured (CoW/SSD-remapped, network). Non-zero means a "destroyed"
+    /// count must not be read as "unrecoverable" (audit C-1).
+    pub unassured_fs: usize,
 }
+
+/// Convert raw bytes read from stdin into a `PathBuf` without mangling them.
+///
+/// On Unix a path is an arbitrary byte string, so the bytes map straight to an
+/// `OsStr` (audit H-1: non-UTF-8 names must survive). On non-Unix targets (not
+/// a supported platform, kept only for portability) we fall back to a lossy
+/// UTF-8 interpretation.
+#[cfg(unix)]
+fn bytes_to_path(bytes: &[u8]) -> PathBuf {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    PathBuf::from(OsStr::from_bytes(bytes))
+}
+
+#[cfg(not(unix))]
+fn bytes_to_path(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// Warn when a target has more than one hard link (audit L-1).
+///
+/// Destroying the content scrubs the shared inode — good — but the *other*
+/// names still exist as directory entries pointing at the now-overwritten inode,
+/// so (a) the rename-to-hide-the-name step is defeated for those names and
+/// (b) the data is destroyed under every name at once, which may surprise the
+/// user. GNU `shred` warns the same way. Link counts are a Unix concept.
+#[cfg(unix)]
+fn warn_if_hardlinked(path: &Path, meta: &std::fs::Metadata) {
+    use std::os::unix::fs::MetadataExt;
+    let links = meta.nlink();
+    if links > 1 {
+        eprintln!(
+            "override: warning: {}: hard-linked ({} links); the content is shared, so \
+             it is destroyed under the other {} name(s) too, and those names remain in \
+             place pointing at the overwritten inode",
+            path.display(),
+            links,
+            links - 1
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_hardlinked(_path: &Path, _meta: &std::fs::Metadata) {}
 
 /// Build the overwrite byte source from the optional `--source` path, printing
 /// the custom-source caution (once) when a file is used. Shared by the file
@@ -71,8 +119,14 @@ impl Runner {
     /// The prompt is written to stderr so it does not interfere with piping and
     /// so a heredoc/pipe of paths (`printf '%s\n' a b | override -p`) also works
     /// non-interactively. Whitespace-only lines are treated as the terminator.
+    ///
+    /// Lines are read as **raw bytes** (`read_until`) rather than into a UTF-8
+    /// `String`: Linux paths are arbitrary byte sequences, and reading into a
+    /// `String` would error on the first non-UTF-8 name, so a sensitive file
+    /// with such a name could never be queued (audit H-1). The bytes are turned
+    /// into a `PathBuf` losslessly on Unix (see [`bytes_to_path`]).
     fn read_prompted_paths(verbose: bool) -> io::Result<Vec<PathBuf>> {
-        use std::io::Write;
+        use std::io::{BufRead, Write};
 
         let mut paths = Vec::new();
         let stdin = io::stdin();
@@ -86,24 +140,30 @@ impl Runner {
             );
         }
 
+        let mut handle = stdin.lock();
         loop {
             if interactive {
                 let _ = write!(err, "path> ");
                 let _ = err.flush();
             }
-            let mut line = String::new();
-            let n = stdin.read_line(&mut line)?;
+            let mut line: Vec<u8> = Vec::new();
+            let n = handle.read_until(b'\n', &mut line)?;
             if n == 0 {
                 break; // EOF
             }
-            let trimmed = line.trim_end_matches(|c| c == '\n' || c == '\r');
-            if trimmed.trim().is_empty() {
-                break; // blank line terminates the list
+            // Strip a trailing CR/LF at the byte level (keep any other bytes).
+            while matches!(line.last(), Some(b'\n' | b'\r')) {
+                line.pop();
+            }
+            // A blank / all-whitespace line terminates the list.
+            if line.iter().all(u8::is_ascii_whitespace) {
+                break;
             }
             if verbose {
-                let _ = writeln!(err, "override: queued {trimmed}");
+                // Display may be lossy; the queued path keeps its exact bytes.
+                let _ = writeln!(err, "override: queued {}", String::from_utf8_lossy(&line));
             }
-            paths.push(PathBuf::from(trimmed));
+            paths.push(bytes_to_path(&line));
         }
 
         Ok(paths)
@@ -151,10 +211,13 @@ impl Runner {
                 for entry in WalkDir::new(path).follow_links(false) {
                     match entry {
                         Ok(e) if e.file_type().is_file() => match e.metadata() {
-                            Ok(m) => files.push(Target {
-                                id: FileId::of(&m),
-                                path: e.into_path(),
-                            }),
+                            Ok(m) => {
+                                warn_if_hardlinked(e.path(), &m);
+                                files.push(Target {
+                                    id: FileId::of(&m),
+                                    path: e.into_path(),
+                                });
+                            }
                             Err(err) => {
                                 eprintln!("override: {}: {err}", e.path().display());
                                 errors += 1;
@@ -168,6 +231,7 @@ impl Runner {
                     }
                 }
             } else if meta.is_file() {
+                warn_if_hardlinked(path, &meta);
                 files.push(Target {
                     id: FileId::of(&meta),
                     path: path.clone(),
@@ -312,13 +376,16 @@ impl Runner {
         let mut summary = Summary {
             destroyed: 0,
             failed: collect_errors,
+            unassured_fs: 0,
         };
 
         // Warn once per distinct filesystem where logical overwrites may not
         // reach physical blocks (btrfs/ZFS/overlay) or are volatile (tmpfs).
+        // The count of filesystems where destruction can't be assured is carried
+        // into the summary so the caller can qualify its "destroyed" line.
         let paths: Vec<PathBuf> = files.iter().map(|t| t.path.clone()).collect();
         let mut seen_fs = HashSet::new();
-        fswarn::warn_for_paths(&paths, &mut seen_fs);
+        summary.unassured_fs = fswarn::warn_for_paths(&paths, &mut seen_fs);
 
         // Dry run: describe the plan for each collected file and stop. Collection
         // errors are still folded into `failed`, so a bad target still exits 1.

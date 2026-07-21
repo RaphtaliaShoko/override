@@ -45,6 +45,13 @@ Linux is the primary, fully-tested target; the FreeBSD path compiles for
 `x86_64-unknown-freebsd` but the integration test that exercises self-shredding
 runs on Linux. The `install.sh` release installer remains Linux-only.
 
+**Cost (informational, audit I-4).** The re-exec reads the whole executable
+image into an anonymous memfd on **every** invocation, including `--dry-run`,
+briefly holding roughly a second copy of the binary in RAM. For a small static
+binary this is negligible; it is kept unconditional (rather than skipped for
+dry-run) so a dry run mirrors a real run exactly — including how the re-exec
+handles the argument vector.
+
 An automated integration test (`self_resilience_shreds_own_binary`) copies the
 binary into a temp dir, runs it against dummy files **plus its own copy**, and
 asserts it completes and destroys everything.

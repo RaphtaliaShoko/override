@@ -10,12 +10,16 @@ See also: [crypto.md](crypto.md), [architecture.md](architecture.md),
 
 - **`--iterations` = N per round** (phases 2 and 4 each get N passes), documented
   in [architecture.md](architecture.md).
-- **Default counts**: `-e 1 -i 1 -n 1 -u 1` — with crypto-shredding as the
-  primary defense, a single random pass suffices; raise `-i` for extra overwrite
-  rounds on magnetic media.
+- **Default counts**: `-e 1 -i 1 -n 1 -u 1` — on non-remapped media
+  crypto-shredding plus a single random pass suffices as defense-in-depth; raise
+  `-i` for extra overwrite rounds on magnetic media. (No pass count assures
+  destruction on SSD/CoW; see [filesystems.md](filesystems.md).)
 - **In-place, same-length encryption** writing ciphertext-without-tag, chosen so
-  the encryption phase truly overwrites the original blocks (important on HDDs)
-  rather than reallocating via a temp-file rename.
+  the encryption phase overwrites the original blocks *where the filesystem
+  writes in place* (ext4/xfs on non-remapped media) rather than reallocating via
+  a temp-file rename. Note this does **not** overcome CoW/SSD block remapping —
+  there the in-place crypto-shred has the same limitation as the overwrite
+  passes ([filesystems.md](filesystems.md)).
 - **AEAD tag discarded** with the key: the data is never meant to be decrypted;
   AEAD is chosen only as a well-reviewed primitive.
 - **Self-resilience via memfd re-exec + static musl** (both, belt and

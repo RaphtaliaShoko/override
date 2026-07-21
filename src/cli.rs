@@ -41,7 +41,9 @@ pub enum Order {
         override -o batch *.log             Batch order across many files\n  \
         override -p                         Type paths on stdin so they stay out of shell history\n\n\
         Note: on SSDs and copy-on-write filesystems (btrfs, ZFS, ...) logical\n\
-        overwrites may not reach the original physical blocks; see the README."
+        writes may not reach the original physical blocks -- this limits the\n\
+        in-place crypto-shred just as much as the overwrite passes, so neither\n\
+        assures destruction there. See the README."
 )]
 pub struct Cli {
     /// Files and/or directories to destroy.
@@ -109,9 +111,11 @@ pub struct Cli {
     ///
     /// WARNING: a predictable or low-entropy source file weakens the overwrite
     /// guarantee (the written bytes become guessable) and is NOT recommended for
-    /// serious security use -- prefer the default CSPRNG. Crypto-shredding still
-    /// applies regardless, but the random passes are only as unpredictable as
-    /// this source.
+    /// serious security use -- prefer the default CSPRNG. The random passes are
+    /// only as unpredictable as this source. (Crypto-shredding is a separate,
+    /// defense-in-depth layer -- and, like the overwrites, is only effective
+    /// where a logical write reaches the original physical block; see the
+    /// SSD/CoW note below.)
     #[arg(short, long, value_name = "PATH")]
     pub source: Option<PathBuf>,
 
@@ -147,11 +151,22 @@ pub struct Cli {
     /// removes the fill file. The random/null pass counts (-i / -n) and --source
     /// apply. This does NOT scrub slack inside still-allocated blocks and is
     /// ineffective on copy-on-write/SSD-remapped storage. It temporarily fills
-    /// the volume to 100%; do not point it at a system/root filesystem.
+    /// the volume to 100%; pointing it at the root/system filesystem is refused
+    /// unless --force is given. As a non-root user on ext2/3/4 the reserved
+    /// blocks (default ~5%) are never allocated, so that fraction of free space
+    /// is NOT wiped -- run as root, or lower the reserve first (tune2fs -m 0).
     ///
     /// Cannot be combined with file targets.
     #[arg(long, value_name = "PATH", conflicts_with = "paths")]
     pub wipe_free: Option<PathBuf>,
+
+    /// Override safety guards.
+    ///
+    /// Currently this permits `--wipe-free` on the root/system filesystem, which
+    /// is otherwise refused because filling it to 100% can crash running services
+    /// or the whole system. Use only when you are sure the volume is safe to fill.
+    #[arg(long)]
+    pub force: bool,
 }
 
 impl Cli {
@@ -242,6 +257,14 @@ mod tests {
         assert_eq!(ns_seq.resolved_order(), Order::Sequential);
         let batch = Cli::try_parse_from(["override", "-o", "batch", "f"]).unwrap();
         assert_eq!(batch.resolved_order(), Order::Batch);
+    }
+
+    #[test]
+    fn force_flag_parses_and_defaults_off() {
+        let plain = Cli::try_parse_from(["override", "f"]).unwrap();
+        assert!(!plain.force);
+        let forced = Cli::try_parse_from(["override", "--wipe-free", "/mnt", "--force"]).unwrap();
+        assert!(forced.force);
     }
 
     #[test]

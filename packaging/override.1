@@ -34,8 +34,10 @@ Every write is flushed and fsync'd. The encryption key is generated with a
 CSPRNG, used once, and zeroized immediately \(em it is never written or printed.
 .PP
 .B Note:
-on SSDs and copy-on-write filesystems (btrfs, ZFS, ...) logical overwrites may
-not reach the original physical blocks. See the shipped documentation in
+on SSDs and copy-on-write filesystems (btrfs, ZFS, ...) a logical write may not
+reach the original physical blocks. This limits the in-place crypto-shred just
+as much as the overwrite passes, so neither assures destruction on such media.
+See the shipped documentation in
 .I /usr/share/doc/override-tool
 for details.
 .SH OPTIONS
@@ -89,8 +91,17 @@ an interrupt arrives. A second interrupt forces immediate exit.
 .TP
 .BI \-\-wipe\-free " PATH"
 Wipe the free space of the filesystem containing the given directory instead of
-destroying files. Temporarily fills the volume to 100%; do not point it at a
-system/root filesystem. Cannot be combined with file targets.
+destroying files. Temporarily fills the volume to 100%. Pointing it at the
+root/system filesystem is refused unless
+.B \-\-force
+is given. As a non-root user on ext2/3/4 the reserved blocks (default ~5%) are
+not allocated, so that fraction of free space is not wiped; run as root or lower
+the reserve first (\fBtune2fs \-m 0\fR). Cannot be combined with file targets.
+.TP
+.B \-\-force
+Override safety guards. Currently: permit
+.B \-\-wipe\-free
+on the root/system filesystem.
 .TP
 .BR \-h ", " \-\-help
 Print help.
@@ -117,9 +128,11 @@ Emergency: encrypt+rename now, loop, delete on Ctrl-C.
 Returns 0 on success and non-zero if any target could not be processed.
 .SH SECURITY
 Recovery resistance depends on the underlying storage. On copy-on-write
-filesystems and flash storage (SSDs, USB sticks, SD cards) with wear-leveling,
-overwrites may not hit the original blocks; crypto-shredding is the primary
-defense in those cases. See
+filesystems and flash storage (SSDs, USB sticks, SD cards) with wear-leveling, a
+write may not hit the original blocks \(em and because the plaintext already
+exists on the media, the in-place crypto-shred is limited exactly as the
+overwrite passes are, so neither can assure destruction there. Prefer full-disk
+encryption, ATA/NVMe secure-erase, or physical destruction. See
 .I /usr/share/doc/override-tool/security.md.gz
 and
 .I filesystems.md.gz.

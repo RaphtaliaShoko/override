@@ -127,24 +127,30 @@ resolve_sudo() {
 }
 
 # HEAD-check a URL (used by --dry). Returns 0 if reachable.
+#
+# Both branches refuse a plaintext (non-HTTPS) URL or a redirect to one, and
+# require TLS >= 1.2, so a network attacker cannot downgrade the transport:
+# curl uses --proto '=https' --tlsv1.2; wget uses --https-only
+# --secure-protocol=TLSv1_2 (its equivalents), which the wget path previously
+# lacked (audit I-1).
 url_reachable() {
     local url="$1"
     if have curl; then
         curl -fsIL --proto '=https' --tlsv1.2 -o /dev/null "$url"
     elif have wget; then
-        wget -q --spider "$url"
+        wget -q --https-only --secure-protocol=TLSv1_2 --spider "$url"
     else
         return 2
     fi
 }
 
-# Download $1 to $2.
+# Download $1 to $2. Same HTTPS-only / TLS>=1.2 pinning as url_reachable.
 download() {
     local url="$1" dest="$2"
     if have curl; then
         curl -fsSL --proto '=https' --tlsv1.2 -o "$dest" "$url"
     elif have wget; then
-        wget -O "$dest" "$url"
+        wget --https-only --secure-protocol=TLSv1_2 -O "$dest" "$url"
     else
         die "need either 'curl' or 'wget' to download the binary"
     fi

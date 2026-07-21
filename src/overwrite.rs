@@ -161,11 +161,27 @@ pub fn fsync_parent_dir(path: &Path) -> io::Result<()> {
 /// Generate a random file name of `len` characters.
 fn random_name(len: usize) -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
-    let mut raw = vec![0u8; len];
-    OsRng.fill_bytes(&mut raw);
-    raw.iter()
-        .map(|b| ALPHABET[(*b as usize) % ALPHABET.len()] as char)
-        .collect()
+    // Rejection sampling to avoid modulo bias (audit I-2): 256 is not a multiple
+    // of 36, so a plain `byte % 36` slightly over-represents the first four
+    // symbols. Discard byte values in the biased tail [limit, 256) and re-draw.
+    // (Temp names are not secret, but unbiased is cheap and correct.)
+    let n = ALPHABET.len();
+    let limit = 256 - (256 % n); // 252 for n = 36
+    let mut out = String::with_capacity(len);
+    let mut buf = [0u8; 64];
+    let mut idx = buf.len(); // force an initial refill on the first iteration
+    while out.len() < len {
+        if idx == buf.len() {
+            OsRng.fill_bytes(&mut buf);
+            idx = 0;
+        }
+        let b = buf[idx] as usize;
+        idx += 1;
+        if b < limit {
+            out.push(ALPHABET[b % n] as char);
+        }
+    }
+    out
 }
 
 /// The name length to use on rename pass `pass`, shrinking by one per pass
@@ -408,6 +424,19 @@ mod tests {
         let mut v = Vec::new();
         File::open(path).unwrap().read_to_end(&mut v).unwrap();
         v
+    }
+
+    #[test]
+    fn random_name_has_requested_length_and_charset() {
+        const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+        for len in [1usize, 5, 8, 40] {
+            let name = random_name(len);
+            assert_eq!(name.chars().count(), len, "wrong length for {len}");
+            assert!(
+                name.bytes().all(|c| ALPHABET.contains(&c)),
+                "unexpected character in {name}"
+            );
+        }
     }
 
     #[test]

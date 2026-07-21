@@ -9,7 +9,7 @@ _override() {
     local opts="-p --prompt -v --verbose --dry-run -r --recursive \
         -e --encryption -i --iterations -n --null --no-verify \
         -s --source -u --rename -o --order --no-stop --wipe-free \
-        -h --help -V --version"
+        --force -h --help -V --version"
 
     case "$prev" in
         -o|--order)

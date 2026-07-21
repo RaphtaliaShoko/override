@@ -31,6 +31,12 @@ These hold on every code path, including under `--verbose`:
 - **Keys are scrubbed immediately after use** with `zeroize` (volatile writes +
   a compiler fence, so the scrub survives `lto = true` / `opt-level = 3`), and
   working buffers are zeroized after each pass. See [crypto.md](crypto.md).
+- **The process is made non-dumpable** (`prctl(PR_SET_DUMPABLE, 0)` on Linux,
+  set right after any re-exec) so the in-flight key and plaintext chunks cannot
+  be captured by a same-user core dump, `ptrace`, or `/proc/<pid>/mem` while the
+  run is in progress. This is best-effort defense-in-depth; buffers are not
+  `mlock`ed, so it does not defend against an adversary who can read swap or the
+  raw RAM.
 - **Randomness is cryptographic.** Overwrite and key bytes come from the OS
   CSPRNG (`getrandom`/`OsRng`) unless you explicitly pass a `--source` file
   (which is only as unpredictable as its contents — discouraged for serious use).
@@ -51,15 +57,27 @@ These hold on every code path, including under `--verbose`:
 
 ## What crypto-shredding does and does not promise
 
-Crypto-shredding ([crypto.md](crypto.md)) makes the plaintext cryptographically
-unrecoverable the moment the key is discarded — this is the guarantee that holds
-even on SSDs and copy-on-write filesystems where physical overwriting cannot be
-promised (see [filesystems.md](filesystems.md)). The overwrite/rename/delete
-phases are **defense-in-depth** against implementation slips and metadata leakage,
-not the primary guarantee.
+Crypto-shredding ([crypto.md](crypto.md)) makes the *ciphertext* it writes
+cryptographically unrecoverable the moment the key is discarded. But `override`
+encrypts data that **already exists as plaintext on disk**, so this only assures
+destruction when writing the ciphertext back **physically overwrites the
+plaintext blocks**:
 
-For whole-disk assurance, prefer full-disk encryption from the start, the drive's
-ATA/NVMe secure-erase command, or physical destruction.
+- **Where a logical overwrite reaches the original physical block** (ext4/xfs on
+  non-remapped media) the crypto-shred pass is effective, and it is a genuine
+  extra layer over the raw overwrites.
+- **Where it does not** — SSD flash-translation layers, copy-on-write /
+  log-structured / snapshotted filesystems (btrfs, ZFS) — the write can be
+  redirected to freshly allocated blocks, leaving the original plaintext intact
+  regardless of the discarded key. There the in-place crypto-shred has the
+  **same physical limitation as the overwrite passes**; it is **not** a bypass
+  for those media (see [filesystems.md](filesystems.md)). `override` prints a
+  runtime warning when it detects such a filesystem.
+
+Treat crypto-shred, the overwrites, the rename, and the delete as
+**defense-in-depth layers**, none of which is a primary guarantee on remapped
+storage. For whole-disk assurance, prefer full-disk encryption from the start,
+the drive's ATA/NVMe secure-erase command, or physical destruction.
 
 ---
 

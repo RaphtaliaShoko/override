@@ -84,19 +84,32 @@ fn running_from_memfd() -> bool {
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn build_argv_envp() -> (Vec<std::ffi::CString>, Vec<std::ffi::CString>) {
     use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
 
+    // Rebuild argv from the RAW bytes of each argument. `to_string_lossy` would
+    // replace every invalid-UTF-8 byte with U+FFFD, mangling non-UTF-8 target
+    // paths (common with legacy locales, archive extraction, or deliberately
+    // obscured names) so the re-exec'd child operates on a file that does not
+    // exist -- silently failing to destroy exactly the file it was asked to
+    // (audit H-1). A byte-faithful CString preserves the path exactly. The only
+    // byte a CString cannot hold is an interior NUL, which is impossible in a
+    // real argv element, so the fallback is unreachable in practice.
     let argv: Vec<CString> = std::env::args_os()
-        .map(|a| {
-            CString::new(a.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| CString::new("").unwrap())
-        })
+        .map(|a| CString::new(a.as_bytes()).unwrap_or_else(|_| CString::new("").unwrap()))
         .collect();
 
+    // Same byte-faithful treatment for the environment: join key and value
+    // around a literal b'=' at the byte level rather than via lossy strings, so
+    // a non-UTF-8 value (e.g. a path in an env var) survives the re-exec intact.
     let mut envp: Vec<CString> = std::env::vars_os()
         .filter(|(k, _)| k != GUARD)
-        .map(|(k, v)| {
-            CString::new(format!("{}={}", k.to_string_lossy(), v.to_string_lossy()))
-                .unwrap_or_else(|_| CString::new("PLACEHOLDER=1").unwrap())
+        .filter_map(|(k, v)| {
+            let mut bytes = k.as_bytes().to_vec();
+            bytes.push(b'=');
+            bytes.extend_from_slice(v.as_bytes());
+            // Drop only entries that contain an interior NUL (cannot occur in a
+            // real environ entry); never mangle the bytes we keep.
+            CString::new(bytes).ok()
         })
         .collect();
     envp.push(CString::new(format!("{GUARD}=1")).unwrap());

@@ -174,13 +174,32 @@ fn self_resilience_shreds_own_binary() {
     write_file(&v2, &vec![0u8; 20_000]);
 
     // Run the COPY, targeting itself plus the victims.
-    let out = Command::new(&exe_copy)
-        .arg("-v")
-        .arg(&exe_copy)
-        .arg(&v1)
-        .arg(&v2)
-        .output()
-        .unwrap();
+    //
+    // Spawning a just-written executable can transiently fail with ETXTBSY when
+    // other threads in this parallel test binary fork for their own subprocess
+    // spawns and briefly inherit the still-open writable fd to the copy. That is
+    // a harness artifact, not a tool bug (a real spawn regression would surface a
+    // different errno, which we still panic on), so retry only on ETXTBSY. A
+    // failed exec never deletes the copy, so a retry is safe.
+    let out = {
+        let mut attempt = 0;
+        loop {
+            match Command::new(&exe_copy)
+                .arg("-v")
+                .arg(&exe_copy)
+                .arg(&v1)
+                .arg(&v2)
+                .output()
+            {
+                Ok(o) => break o,
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 100 => {
+                    attempt += 1;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("failed to spawn the copied binary: {e}"),
+            }
+        }
+    };
 
     assert!(
         out.status.success(),
@@ -198,6 +217,77 @@ fn self_resilience_shreds_own_binary() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("3 destroyed"), "stdout: {stdout}");
+}
+
+/// A target whose name contains a non-UTF-8 byte must survive the
+/// self-resilience re-exec and actually be destroyed (audit H-1). Before the fix
+/// the re-exec rebuilt argv with `to_string_lossy`, replacing the byte with
+/// U+FFFD, so the child operated on a file that did not exist and reported the
+/// real file as `failed` while leaving it on disk with full plaintext.
+#[test]
+#[cfg(unix)]
+fn non_utf8_target_survives_reexec_and_is_destroyed() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = tempfile::tempdir().unwrap();
+
+    // Build "<tmpdir>/secret_<0xFF>_file.txt" with a raw invalid-UTF-8 byte.
+    let mut name = b"secret_".to_vec();
+    name.push(0xFF);
+    name.extend_from_slice(b"_file.txt");
+    let mut full = dir.path().as_os_str().to_os_string().into_vec();
+    full.push(b'/');
+    full.extend_from_slice(&name);
+    let target = PathBuf::from(OsString::from_vec(full));
+
+    write_file(&target, b"top secret content");
+    assert!(target.exists(), "precondition: target created");
+
+    // Real run (re-exec active by default). The re-exec must pass the exact
+    // bytes through so the child destroys the file it was asked to.
+    let out = Command::new(bin()).arg(&target).output().unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "exit should be 0. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("1 destroyed") && stdout.contains("0 failed"),
+        "non-UTF-8 target must be destroyed, not failed. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        !target.exists(),
+        "the non-UTF-8 target must actually be gone"
+    );
+}
+
+/// A hard-linked target must trigger a warning (audit L-1): overwriting the
+/// shared inode destroys the data under every name, and the other names survive.
+#[test]
+#[cfg(unix)]
+fn hard_linked_target_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.txt");
+    let b = dir.path().join("b.txt");
+    write_file(&a, b"shared content");
+    fs::hard_link(&a, &b).unwrap();
+
+    // Dry-run so nothing is destroyed; the warning must still appear.
+    let out = Command::new(bin())
+        .arg("--dry-run")
+        .arg(&a)
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("hard-linked"),
+        "expected a hard-link warning, got stderr: {stderr}"
+    );
+    assert!(a.exists() && b.exists(), "dry run must not remove anything");
 }
 
 /// Partial failure: a non-existent target among valid ones must not stop the

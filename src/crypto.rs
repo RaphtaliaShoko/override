@@ -1,16 +1,29 @@
 //! Encryption phase: crypto-shredding.
 //!
 //! Each pass generates a fresh random ChaCha20-Poly1305 key, encrypts the
-//! file's current bytes in place, then zeroizes the key. Because the key is
-//! discarded, the plaintext becomes cryptographically inaccessible.
+//! file's current bytes in place, then zeroizes the key. Once the key is gone
+//! the ciphertext is cryptographically inaccessible.
+//!
+//! IMPORTANT scope note. The target's plaintext already exists on disk before
+//! we run, so this pass only helps if writing the ciphertext back *physically
+//! overwrites the plaintext blocks*. That holds on media/filesystems where a
+//! logical overwrite rewrites the same physical block (ext4/xfs on
+//! non-remapped storage), and there this pass is effective. It does NOT hold on
+//! copy-on-write/log-structured filesystems or SSD flash-translation layers,
+//! where the write can be redirected to freshly allocated blocks and the
+//! original plaintext survives regardless of the discarded key. On those media
+//! the in-place crypto-shred has the *same* physical limitation as the
+//! overwrite passes -- it is not a substitute for physical erasure (see
+//! `fswarn`, `docs/crypto.md`, `docs/filesystems.md`).
 //!
 //! The file is processed in fixed-size chunks so files of any size use bounded
 //! memory. Each chunk is authenticated-encrypted with a per-chunk nonce; we
 //! write back only the ciphertext (same length as the plaintext, since
-//! ChaCha20 is a stream cipher) so the overwrite is strictly in place -- the
-//! original plaintext blocks are physically rewritten rather than reallocated.
-//! The 16-byte authentication tag is intentionally discarded with the key,
-//! because the data is never meant to be decrypted again.
+//! ChaCha20 is a stream cipher) so the overwrite is strictly in place -- on
+//! non-remapped storage the original plaintext blocks are physically rewritten
+//! rather than reallocated. The 16-byte authentication tag is intentionally
+//! discarded with the key, because the data is never meant to be decrypted
+//! again.
 
 use crate::signals;
 use crate::CHUNK;

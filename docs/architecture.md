@@ -76,13 +76,19 @@ interrupt forces immediate termination (exit code 130).
   compiler cannot optimize away), followed by `flush()` and `sync_all()`
   (`fsync`) after **every pass** to force data past the page cache to storage.
 - Random bytes come from the OS CSPRNG by default, or from a `--source` file
-  read in a streaming, wrap-around fashion (loaded once, repeated to cover files
-  of any size). An empty source file is rejected.
+  read in a streaming, wrap-around fashion — one window (≤ 1 MiB) at a time with
+  **bounded memory**, wrapping back to the start to cover files of any size. A
+  huge file or an endless character device (e.g. `/dev/urandom`) is therefore
+  streamed, not buffered. An empty source file is rejected. (`/dev/urandom` as a
+  source is effectively equivalent to the default CSPRNG, just slower — prefer
+  the default.)
   - ⚠️ **A custom `--source` is only as unpredictable as its contents.** A
     predictable or low-entropy source file makes the written bytes guessable and
     weakens the overwrite passes; it is **not recommended for serious security
     use** — prefer the default CSPRNG. `--help` and a runtime stderr warning both
-    flag this. (Crypto-shredding still applies regardless of the source.)
+    flag this. (The crypto-shred phase is independent of `--source`, which only
+    feeds the overwrite passes — though on CoW/SSD it carries the same
+    physical-storage caveat, see [filesystems.md](filesystems.md).)
 - Null passes write zero bytes.
 
 ---
