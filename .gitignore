@@ -1,3 +1,11 @@
+# Rust build artifacts
 /target
-/.Obsidian
+
+# Debian package build output
+/dist
+
+# Local editor / tooling state
 /.claude/settings.local.json
+
+# Test VM (keys, disk images, etc.) — never commit
+/VM

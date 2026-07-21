@@ -1,0 +1,6 @@
+override-tool (1.1.0-1) unstable; urgency=medium
+
+  * Package the override secure file-destruction tool for Debian-based systems.
+  * Ships the override(1) binary, man page, bash completion, and reference docs.
+
+ -- RaphtaliaShoko <raphael.canevet@pm.me>  Tue, 21 Jul 2026 00:00:00 +0000

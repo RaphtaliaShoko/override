@@ -1,0 +1,130 @@
+.TH OVERRIDE 1 "July 2026" "override 1.1.0" "User Commands"
+.SH NAME
+override \- securely destroy files with crypto-shredding, multi-pass overwrites, and self-resilience
+.SH SYNOPSIS
+.B override
+.RI [ OPTIONS ]
+.IR PATH ...
+.br
+.B override
+.RB [ \-\-prompt ]
+.RI [ OPTIONS ]
+.br
+.B override
+.BI \-\-wipe\-free " DIR"
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B override
+securely destroys files so their content cannot be recovered. The default
+destruction pipeline applied to every target is:
+.IP 1. 4
+encrypt (crypto-shred: encrypt in place, then discard the key)
+.IP 2. 4
+random overwrite (phase A)
+.IP 3. 4
+null (zero) overwrite
+.IP 4. 4
+random overwrite (phase B)
+.IP 5. 4
+rename to random name(s)
+.IP 6. 4
+delete (unlink)
+.PP
+Every write is flushed and fsync'd. The encryption key is generated with a
+CSPRNG, used once, and zeroized immediately \(em it is never written or printed.
+.PP
+.B Note:
+on SSDs and copy-on-write filesystems (btrfs, ZFS, ...) logical overwrites may
+not reach the original physical blocks. See the shipped documentation in
+.I /usr/share/doc/override-tool
+for details.
+.SH OPTIONS
+.TP
+.BR \-p ", " \-\-prompt
+Read one or more target paths interactively from stdin, one per line, until a
+blank line or EOF. Paths read this way are never passed as arguments, so they do
+not appear in shell history. Command-line paths are still processed.
+.TP
+.BR \-v ", " \-\-verbose
+Print detailed progress for every file, phase and pass.
+.TP
+.B \-\-dry\-run
+Show what would be destroyed without touching anything.
+.TP
+.BR \-r ", " \-\-recursive
+Recurse into directories and process every file inside.
+.TP
+.BR \-e ", " \-\-encryption " \fIN\fR"
+Number of encryption (crypto-shred) passes. 0 disables the phase. Default: 1.
+.TP
+.BR \-i ", " \-\-iterations " \fIN\fR"
+Number of random-data overwrite passes, applied in both random rounds. 0
+disables random overwrite. Default: 1.
+.TP
+.BR \-n ", " \-\-null " \fIN\fR"
+Number of zero-fill overwrite passes. 0 disables the null phase. Default: 1.
+.TP
+.B \-\-no\-verify
+Skip read-back verification of the encryption pass (faster, less safe).
+.TP
+.BR \-s ", " \-\-source " \fIPATH\fR"
+File used as the source of bytes for overwrite passes, read in a streaming,
+wrap-around fashion. Defaults to the OS CSPRNG. A predictable or low-entropy
+source weakens the overwrite guarantee and is not recommended.
+.TP
+.BR \-u ", " \-\-rename " \fIN\fR"
+Number of times to rename the file to a random name before deletion. Default: 1.
+.TP
+.BR \-o ", " \-\-order " \fIsequential\fR|\fIbatch\fR"
+Processing order when multiple targets are given. Defaults to
+.I sequential
+(or
+.I batch
+under \-\-no\-stop).
+.TP
+.B \-\-no\-stop
+Keep overwriting the targets until interrupted, then delete them. Each file is
+crypto-shredded and renamed up front, then looped over random/null/random until
+an interrupt arrives. A second interrupt forces immediate exit.
+.TP
+.BI \-\-wipe\-free " PATH"
+Wipe the free space of the filesystem containing the given directory instead of
+destroying files. Temporarily fills the volume to 100%; do not point it at a
+system/root filesystem. Cannot be combined with file targets.
+.TP
+.BR \-h ", " \-\-help
+Print help.
+.TP
+.BR \-V ", " \-\-version
+Print version.
+.SH EXAMPLES
+.TP
+.B override secret.txt
+Run the default pipeline on one file.
+.TP
+.B override -v -r ./olddir
+Recursively destroy a directory, verbosely.
+.TP
+.B override -e 2 -i 3 -n 1 a.bin b.bin
+Two encryption, three random, one null pass.
+.TP
+.B override -i 0 -e 0 -n 3 log.txt
+Null-only wipe (no encryption/random).
+.TP
+.B override --no-stop -u 5 target.dat
+Emergency: encrypt+rename now, loop, delete on Ctrl-C.
+.SH EXIT STATUS
+Returns 0 on success and non-zero if any target could not be processed.
+.SH SECURITY
+Recovery resistance depends on the underlying storage. On copy-on-write
+filesystems and flash storage (SSDs, USB sticks, SD cards) with wear-leveling,
+overwrites may not hit the original blocks; crypto-shredding is the primary
+defense in those cases. See
+.I /usr/share/doc/override-tool/security.md.gz
+and
+.I filesystems.md.gz.
+.SH AUTHOR
+Written by the override project.
+.SH COPYRIGHT
+MIT License. See
+.I /usr/share/doc/override-tool/copyright.

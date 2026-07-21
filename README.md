@@ -42,6 +42,16 @@ Every download is **cryptographically verified** (minisign signature against a
 public key embedded in the script itself) and the install **fails closed** on any
 mismatch. Full verification model and options → **[docs/installer.md](docs/installer.md)**.
 
+On Debian/Ubuntu you can instead build a native **`.deb`** from this source tree
+(integrates with `apt`/`dpkg`, ships a man page and shell completion):
+
+```sh
+./packaging/build-deb.sh                           # → dist/override-tool_<ver>_<arch>.deb
+sudo apt install ./dist/override-tool_1.1.0-1_amd64.deb
+```
+
+Details → **[docs/debian-package.md](docs/debian-package.md)**.
+
 ## Build
 
 Requires a Rust toolchain (tested with Rust 1.97).
@@ -150,6 +160,7 @@ Full model, invariants, and threat notes → **[docs/security.md](docs/security.
 | [resilience.md](docs/resilience.md) | Self-resilience: memfd/`fexecve` re-exec and platform scope |
 | [security.md](docs/security.md) | Security model, invariants, error handling, exit codes |
 | [installer.md](docs/installer.md) | `install.sh` options and the signature-verification model |
+| [debian-package.md](docs/debian-package.md) | Building and installing the `.deb` package |
 | [design.md](docs/design.md) | Design decisions where the spec left room for judgment |
 | [faq.md](docs/faq.md) | Short answers to common questions |
 

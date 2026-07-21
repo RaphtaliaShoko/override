@@ -1,0 +1,35 @@
+# bash completion for override
+_override() {
+    local cur prev words cword
+    _init_completion 2>/dev/null || {
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        prev="${COMP_WORDS[COMP_CWORD-1]}"
+    }
+
+    local opts="-p --prompt -v --verbose --dry-run -r --recursive \
+        -e --encryption -i --iterations -n --null --no-verify \
+        -s --source -u --rename -o --order --no-stop --wipe-free \
+        -h --help -V --version"
+
+    case "$prev" in
+        -o|--order)
+            COMPREPLY=( $(compgen -W "sequential batch" -- "$cur") )
+            return 0
+            ;;
+        -s|--source|--wipe-free)
+            COMPREPLY=( $(compgen -f -- "$cur") )
+            return 0
+            ;;
+        -e|--encryption|-i|--iterations|-n|--null|-u|--rename)
+            return 0
+            ;;
+    esac
+
+    if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+    else
+        COMPREPLY=( $(compgen -f -- "$cur") )
+    fi
+    return 0
+}
+complete -F _override override
