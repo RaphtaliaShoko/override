@@ -36,6 +36,16 @@ These hold on every code path, including under `--verbose`:
   (which is only as unpredictable as its contents — discouraged for serious use).
 - **Writes are real and durable.** Every pass uses real `write` syscalls the
   compiler cannot elide, followed by `flush()` + `sync_all()` (`fsync`).
+- **Targets cannot be redirected mid-run.** Symlinks are skipped at scan time,
+  and every subsequent open re-opens the target with `O_NOFOLLOW` and re-checks
+  the opened inode (device + inode number) against the identity recorded during
+  the scan, aborting the target on any mismatch. The rename and unlink run
+  relative to a held parent-directory fd (`renameat`/`unlinkat`), so a local
+  attacker who can write in the containing directory cannot swap a path
+  component (or the file itself) for a symlink between passes to steer
+  `override`'s destructive writes onto another file (closes a symlink-follow /
+  TOCTOU race). This is Unix-only surface, matching the project's platform
+  scope.
 
 ---
 

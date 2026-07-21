@@ -2,15 +2,23 @@
 //! batch execution, and the `--no-stop` loop.
 
 use crate::cli::{Cli, Order};
-use crate::overwrite::{self, Fill};
+use crate::overwrite::{self, FileId, Fill};
 use crate::progress::Progress;
 use crate::source::ByteSource;
 use crate::{crypto, fswarn, signals};
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+/// A collected file to destroy: its current path plus the identity recorded at
+/// scan time, so every later open/unlink can confirm it is still the same inode
+/// (see [`FileId`]).
+#[derive(Clone, Debug)]
+pub struct Target {
+    pub path: PathBuf,
+    pub id: FileId,
+}
 
 /// Outcome tallies for the whole invocation.
 #[derive(Default, Debug)]
@@ -107,8 +115,9 @@ impl Runner {
         }
     }
 
-    /// Expand the CLI paths into a concrete list of regular files to destroy.
-    pub fn collect_targets(&self) -> (Vec<PathBuf>, usize) {
+    /// Expand the CLI paths into a concrete list of regular files to destroy,
+    /// recording each one's scan-time identity ([`FileId`]) alongside its path.
+    pub fn collect_targets(&self) -> (Vec<Target>, usize) {
         let mut files = Vec::new();
         let mut errors = 0;
 
@@ -141,7 +150,16 @@ impl Runner {
                 }
                 for entry in WalkDir::new(path).follow_links(false) {
                     match entry {
-                        Ok(e) if e.file_type().is_file() => files.push(e.into_path()),
+                        Ok(e) if e.file_type().is_file() => match e.metadata() {
+                            Ok(m) => files.push(Target {
+                                id: FileId::of(&m),
+                                path: e.into_path(),
+                            }),
+                            Err(err) => {
+                                eprintln!("override: {}: {err}", e.path().display());
+                                errors += 1;
+                            }
+                        },
                         Ok(_) => {} // directories and symlinks: skip
                         Err(e) => {
                             eprintln!("override: walk error: {e}");
@@ -150,7 +168,10 @@ impl Runner {
                     }
                 }
             } else if meta.is_file() {
-                files.push(path.clone());
+                files.push(Target {
+                    id: FileId::of(&meta),
+                    path: path.clone(),
+                });
             } else {
                 eprintln!(
                     "override: {}: not a regular file (skipping)",
@@ -162,22 +183,20 @@ impl Runner {
         (files, errors)
     }
 
-    fn open_rw(path: &Path) -> io::Result<(File, u64)> {
-        let file = OpenOptions::new().read(true).write(true).open(path)?;
-        let len = file.metadata()?.len();
-        Ok((file, len))
-    }
+    // ---- individual phases ----------------------------------------------
+    //
+    // Each phase re-opens the target via `overwrite::open_target`, which uses
+    // `O_NOFOLLOW` and re-verifies the inode against the scan-time `FileId`, so
+    // a symlink/rename race between passes cannot redirect the writes.
 
-    // ---- individual phases (operate on a stable path) -------------------
-
-    fn phase_encrypt(&self, path: &Path, progress: &Progress, verify: bool) -> io::Result<()> {
+    fn phase_encrypt(&self, target: &Target, progress: &Progress, verify: bool) -> io::Result<()> {
         let passes = self.cli.encryption;
         for pass in 1..=passes {
-            let (mut file, len) = Self::open_rw(path)?;
+            let (mut file, len) = overwrite::open_target(&target.path, &target.id)?;
             crypto::encrypt_pass(&mut file, len, verify, &mut |n| progress.inc(n))?;
             self.vlog(format_args!(
                 "  [encrypt] {} pass {}/{} (len {}, verify {})",
-                path.display(),
+                target.path.display(),
                 pass,
                 passes,
                 len,
@@ -190,10 +209,15 @@ impl Runner {
         Ok(())
     }
 
-    fn phase_random(&mut self, path: &Path, round: &str, progress: &Progress) -> io::Result<()> {
+    fn phase_random(
+        &mut self,
+        target: &Target,
+        round: &str,
+        progress: &Progress,
+    ) -> io::Result<()> {
         let passes = self.cli.iterations;
         for pass in 1..=passes {
-            let (mut file, len) = Self::open_rw(path)?;
+            let (mut file, len) = overwrite::open_target(&target.path, &target.id)?;
             overwrite::overwrite_pass(
                 &mut file,
                 len,
@@ -208,7 +232,7 @@ impl Runner {
             self.vlog(format_args!(
                 "  [random {}] {} pass {}/{} ({}, len {})",
                 round,
-                path.display(),
+                target.path.display(),
                 pass,
                 passes,
                 src,
@@ -221,14 +245,14 @@ impl Runner {
         Ok(())
     }
 
-    fn phase_null(&self, path: &Path, progress: &Progress) -> io::Result<()> {
+    fn phase_null(&self, target: &Target, progress: &Progress) -> io::Result<()> {
         let passes = self.cli.null;
         for pass in 1..=passes {
-            let (mut file, len) = Self::open_rw(path)?;
+            let (mut file, len) = overwrite::open_target(&target.path, &target.id)?;
             overwrite::overwrite_pass(&mut file, len, &mut Fill::Null, &mut |n| progress.inc(n))?;
             self.vlog(format_args!(
                 "  [null] {} pass {}/{} (len {})",
-                path.display(),
+                target.path.display(),
                 pass,
                 passes,
                 len
@@ -241,44 +265,42 @@ impl Runner {
     }
 
     /// Rename the file to random name(s). Returns the (possibly unchanged) path
-    /// the file now lives at. With `--rename 0` this is a no-op returning `path`.
-    fn phase_rename(&self, path: &Path) -> io::Result<PathBuf> {
+    /// the file now lives at. With `--rename 0` this is a no-op returning the
+    /// current path. The inode is unchanged by the rename, so the target's
+    /// [`FileId`] stays valid at the new path.
+    fn phase_rename(&self, target: &Target) -> io::Result<PathBuf> {
         if self.cli.rename > 0 {
-            overwrite::rename_passes(path, self.cli.rename, self.cli.verbose)
+            overwrite::rename_passes(&target.path, self.cli.rename, self.cli.verbose)
         } else {
-            Ok(path.to_path_buf())
+            Ok(target.path.clone())
         }
     }
 
     /// Unlink the file (which must already sit at its final, possibly renamed,
-    /// path) and durably persist the removal.
-    fn phase_delete(&self, path: &Path) -> io::Result<()> {
-        overwrite::delete(path)?;
-        self.vlog(format_args!("  [delete] unlinked {}", path.display()));
-
-        // Durably persist the removal: fsync the parent directory so a crash
-        // right after the unlink cannot resurrect the directory entry. This is
-        // best-effort -- the file is already gone; only metadata durability is
-        // at stake -- so a failure here does not mark the file as failed.
-        match overwrite::fsync_parent_dir(path) {
-            Ok(()) => self.vlog(format_args!("  [fsync] parent directory synced")),
-            Err(e) => self.vlog(format_args!("  [fsync] parent dir sync skipped: {e}")),
-        }
+    /// path) and durably persist the removal. The unlink is verified against and
+    /// performed relative to the parent-directory fd inside `overwrite::delete`,
+    /// which also fsyncs the directory.
+    fn phase_delete(&self, path: &Path, id: &FileId) -> io::Result<()> {
+        overwrite::delete(path, id)?;
+        self.vlog(format_args!(
+            "  [delete] unlinked {} (parent dir synced)",
+            path.display()
+        ));
         Ok(())
     }
 
     /// Rename then unlink. Returns Ok once the file no longer exists.
-    fn phase_rename_delete(&self, path: &Path) -> io::Result<()> {
-        let final_path = self.phase_rename(path)?;
-        self.phase_delete(&final_path)
+    fn phase_rename_delete(&self, target: &Target) -> io::Result<()> {
+        let final_path = self.phase_rename(target)?;
+        self.phase_delete(&final_path, &target.id)
     }
 
     /// The four overwrite/encrypt phases in default order, on one file.
-    fn wipe_phases(&mut self, path: &Path, progress: &Progress) -> io::Result<()> {
-        self.phase_encrypt(path, progress, !self.cli.no_verify)?;
-        self.phase_random(path, "A", progress)?;
-        self.phase_null(path, progress)?;
-        self.phase_random(path, "B", progress)?;
+    fn wipe_phases(&mut self, target: &Target, progress: &Progress) -> io::Result<()> {
+        self.phase_encrypt(target, progress, !self.cli.no_verify)?;
+        self.phase_random(target, "A", progress)?;
+        self.phase_null(target, progress)?;
+        self.phase_random(target, "B", progress)?;
         Ok(())
     }
 
@@ -294,16 +316,17 @@ impl Runner {
 
         // Warn once per distinct filesystem where logical overwrites may not
         // reach physical blocks (btrfs/ZFS/overlay) or are volatile (tmpfs).
+        let paths: Vec<PathBuf> = files.iter().map(|t| t.path.clone()).collect();
         let mut seen_fs = HashSet::new();
-        fswarn::warn_for_paths(&files, &mut seen_fs);
+        fswarn::warn_for_paths(&paths, &mut seen_fs);
 
         // Dry run: describe the plan for each collected file and stop. Collection
         // errors are still folded into `failed`, so a bad target still exits 1.
         if self.cli.dry_run {
-            for path in &files {
+            for target in &files {
                 println!(
                     "would destroy: {}  [{}]",
-                    path.display(),
+                    target.path.display(),
                     self.pipeline_description()
                 );
             }
@@ -368,46 +391,46 @@ impl Runner {
 
     /// Total bytes the pipeline expects to write across all files. In-place
     /// passes preserve length, so each file contributes `len × pass_count`.
-    fn total_bytes(&self, files: &[PathBuf]) -> u64 {
+    fn total_bytes(&self, files: &[Target]) -> u64 {
         let per_file_passes =
             self.cli.encryption as u64 + 2 * self.cli.iterations as u64 + self.cli.null as u64;
         files
             .iter()
-            .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            .map(|t| std::fs::metadata(&t.path).map(|m| m.len()).unwrap_or(0))
             .map(|len| len.saturating_mul(per_file_passes))
             .sum()
     }
 
-    fn run_sequential(&mut self, files: &[PathBuf], summary: &mut Summary, progress: &Progress) {
-        for path in files {
-            self.vlog(format_args!("Processing {}", path.display()));
+    fn run_sequential(&mut self, files: &[Target], summary: &mut Summary, progress: &Progress) {
+        for target in files {
+            self.vlog(format_args!("Processing {}", target.path.display()));
             let res = self
-                .wipe_phases(path, progress)
-                .and_then(|_| self.phase_rename_delete(path));
+                .wipe_phases(target, progress)
+                .and_then(|_| self.phase_rename_delete(target));
             match res {
                 Ok(()) => summary.destroyed += 1,
                 Err(e) => {
-                    eprintln!("override: {}: {e}", path.display());
+                    eprintln!("override: {}: {e}", target.path.display());
                     summary.failed += 1;
                 }
             }
         }
     }
 
-    fn run_batch(&mut self, files: &[PathBuf], summary: &mut Summary, progress: &Progress) {
+    fn run_batch(&mut self, files: &[Target], summary: &mut Summary, progress: &Progress) {
         // Track which files are still alive; drop any that error out.
         let mut alive: Vec<bool> = vec![true; files.len()];
 
         macro_rules! for_alive {
             ($label:expr, $body:expr) => {{
                 self.vlog(format_args!("== phase: {} ==", $label));
-                for (idx, path) in files.iter().enumerate() {
+                for (idx, target) in files.iter().enumerate() {
                     if !alive[idx] {
                         continue;
                     }
-                    let f: &mut dyn FnMut(&mut Self, &Path) -> io::Result<()> = $body;
-                    if let Err(e) = f(self, path) {
-                        eprintln!("override: {}: {e}", path.display());
+                    let f: &mut dyn FnMut(&mut Self, &Target) -> io::Result<()> = $body;
+                    if let Err(e) = f(self, target) {
+                        eprintln!("override: {}: {e}", target.path.display());
                         alive[idx] = false;
                         summary.failed += 1;
                     }
@@ -415,15 +438,15 @@ impl Runner {
             }};
         }
 
-        for_alive!("encrypt", &mut |s, p| s.phase_encrypt(
-            p,
+        for_alive!("encrypt", &mut |s, t| s.phase_encrypt(
+            t,
             progress,
             !s.cli.no_verify
         ));
-        for_alive!("random A", &mut |s, p| s.phase_random(p, "A", progress));
-        for_alive!("null", &mut |s, p| s.phase_null(p, progress));
-        for_alive!("random B", &mut |s, p| s.phase_random(p, "B", progress));
-        for_alive!("rename+delete", &mut |s, p| s.phase_rename_delete(p));
+        for_alive!("random A", &mut |s, t| s.phase_random(t, "A", progress));
+        for_alive!("null", &mut |s, t| s.phase_null(t, progress));
+        for_alive!("random B", &mut |s, t| s.phase_random(t, "B", progress));
+        for_alive!("rename+delete", &mut |s, t| s.phase_rename_delete(t));
 
         summary.destroyed += alive.iter().filter(|&&a| a).count();
     }
@@ -438,7 +461,7 @@ impl Runner {
     /// on the way out. Under the default batch order the encrypt (and rename)
     /// runs across ALL files before the looping starts, so an early kill has
     /// crypto-shredded the whole set, not just the first file.
-    fn run_no_stop(&mut self, files: &[PathBuf], summary: &mut Summary, progress: &Progress) {
+    fn run_no_stop(&mut self, files: &[Target], summary: &mut Summary, progress: &Progress) {
         let batch = self.cli.resolved_order() == Order::Batch;
         self.vlog(format_args!(
             "no-stop ({} order): encrypt+rename every target up front, then loop \
@@ -446,21 +469,22 @@ impl Runner {
             if batch { "batch" } else { "sequential" }
         ));
 
-        // Each target's CURRENT path (updated once it is renamed) and liveness.
-        let mut paths: Vec<PathBuf> = files.to_vec();
-        let mut alive: Vec<bool> = vec![true; files.len()];
+        // Each target, with its CURRENT path updated once it is renamed. The
+        // inode is unchanged by rename, so `target.id` stays valid throughout.
+        let mut targets: Vec<Target> = files.to_vec();
+        let mut alive: Vec<bool> = vec![true; targets.len()];
 
         // Run `body` over every still-alive target, dropping any that error out.
         macro_rules! for_alive {
             ($label:expr, $body:expr) => {{
                 self.vlog(format_args!("== phase: {} ==", $label));
-                for idx in 0..paths.len() {
+                for idx in 0..targets.len() {
                     if !alive[idx] {
                         continue;
                     }
-                    let f: &mut dyn FnMut(&mut Self, &Path) -> io::Result<()> = $body;
-                    if let Err(e) = f(self, &paths[idx]) {
-                        eprintln!("override: {}: {e}", paths[idx].display());
+                    let f: &mut dyn FnMut(&mut Self, &Target) -> io::Result<()> = $body;
+                    if let Err(e) = f(self, &targets[idx]) {
+                        eprintln!("override: {}: {e}", targets[idx].path.display());
                         alive[idx] = false;
                         summary.failed += 1;
                     }
@@ -472,19 +496,19 @@ impl Runner {
         }
 
         // Rename every still-alive target, recording its new path. Kept separate
-        // from `for_alive!` because it mutates `paths`. A rename is quick and
+        // from `for_alive!` because it mutates `targets`. A rename is quick and
         // atomic, so it runs to the end even if an interrupt has already fired.
         macro_rules! rename_all {
             () => {{
                 self.vlog(format_args!("== phase: rename =="));
-                for idx in 0..paths.len() {
+                for idx in 0..targets.len() {
                     if !alive[idx] {
                         continue;
                     }
-                    match self.phase_rename(&paths[idx]) {
-                        Ok(new_path) => paths[idx] = new_path,
+                    match self.phase_rename(&targets[idx]) {
+                        Ok(new_path) => targets[idx].path = new_path,
                         Err(e) => {
-                            eprintln!("override: {}: {e}", paths[idx].display());
+                            eprintln!("override: {}: {e}", targets[idx].path.display());
                             alive[idx] = false;
                             summary.failed += 1;
                         }
@@ -501,22 +525,22 @@ impl Runner {
         if batch {
             // Crypto-shred the entire set before renaming, so the most important
             // protection covers all targets as early as possible.
-            for_alive!("encrypt", &mut |s, p| s.phase_encrypt(p, progress, false));
+            for_alive!("encrypt", &mut |s, t| s.phase_encrypt(t, progress, false));
             rename_all!();
         } else {
             // Per file: encrypt then immediately rename before the next target.
             self.vlog(format_args!("== phase: encrypt+rename (sequential) =="));
-            for idx in 0..paths.len() {
+            for idx in 0..targets.len() {
                 if !alive[idx] {
                     continue;
                 }
                 match self
-                    .phase_encrypt(&paths[idx], progress, false)
-                    .and_then(|_| self.phase_rename(&paths[idx]))
+                    .phase_encrypt(&targets[idx], progress, false)
+                    .and_then(|_| self.phase_rename(&targets[idx]))
                 {
-                    Ok(new_path) => paths[idx] = new_path,
+                    Ok(new_path) => targets[idx].path = new_path,
                     Err(e) => {
-                        eprintln!("override: {}: {e}", paths[idx].display());
+                        eprintln!("override: {}: {e}", targets[idx].path.display());
                         alive[idx] = false;
                         summary.failed += 1;
                     }
@@ -533,20 +557,20 @@ impl Runner {
             cycle += 1;
             self.vlog(format_args!("-- cycle {cycle} --"));
             if batch {
-                for_alive!("random A", &mut |s, p| s.phase_random(p, "A", progress));
-                for_alive!("null", &mut |s, p| s.phase_null(p, progress));
-                for_alive!("random B", &mut |s, p| s.phase_random(p, "B", progress));
+                for_alive!("random A", &mut |s, t| s.phase_random(t, "A", progress));
+                for_alive!("null", &mut |s, t| s.phase_null(t, progress));
+                for_alive!("random B", &mut |s, t| s.phase_random(t, "B", progress));
             } else {
-                for idx in 0..paths.len() {
+                for idx in 0..targets.len() {
                     if !alive[idx] {
                         continue;
                     }
                     let res = self
-                        .phase_random(&paths[idx], "A", progress)
-                        .and_then(|_| self.phase_null(&paths[idx], progress))
-                        .and_then(|_| self.phase_random(&paths[idx], "B", progress));
+                        .phase_random(&targets[idx], "A", progress)
+                        .and_then(|_| self.phase_null(&targets[idx], progress))
+                        .and_then(|_| self.phase_random(&targets[idx], "B", progress));
                     if let Err(e) = res {
-                        eprintln!("override: {}: {e}", paths[idx].display());
+                        eprintln!("override: {}: {e}", targets[idx].path.display());
                         alive[idx] = false;
                         summary.failed += 1;
                     }
@@ -559,14 +583,14 @@ impl Runner {
 
         // ---- Finalize: delete every surviving target (already renamed above).
         self.vlog(format_args!("interrupt received; deleting targets"));
-        for idx in 0..paths.len() {
+        for idx in 0..targets.len() {
             if !alive[idx] {
                 continue;
             }
-            match self.phase_delete(&paths[idx]) {
+            match self.phase_delete(&targets[idx].path, &targets[idx].id) {
                 Ok(()) => summary.destroyed += 1,
                 Err(e) => {
-                    eprintln!("override: {}: {e}", paths[idx].display());
+                    eprintln!("override: {}: {e}", targets[idx].path.display());
                     summary.failed += 1;
                 }
             }
