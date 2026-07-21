@@ -170,6 +170,7 @@ Full model, invariants, and threat notes → **[docs/security.md](docs/security.
 | [resilience.md](docs/resilience.md) | Self-resilience: memfd/`fexecve` re-exec and platform scope |
 | [security.md](docs/security.md) | Security model, invariants, error handling, exit codes |
 | [installer.md](docs/installer.md) | `install.sh` options and the signature-verification model |
+| [release-pipeline.md](docs/release-pipeline.md) | CI that builds, signs (minisign), and publishes the static release binaries |
 | [debian-package.md](docs/debian-package.md) | Building and installing the `.deb` package |
 | [rpm-package.md](docs/rpm-package.md) | Building and installing the `.rpm` package |
 | [design.md](docs/design.md) | Design decisions where the spec left room for judgment |

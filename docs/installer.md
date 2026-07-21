@@ -5,8 +5,9 @@
 cryptographically before installing. This document covers its options and the
 full verification model. Only Linux on `x86_64`/`aarch64` is supported.
 
-See also: [design.md](design.md) (why signature-over-embedded-key), the
-[README](../README.md) for the quick-start.
+See also: [design.md](design.md) (why signature-over-embedded-key),
+[release-pipeline.md](release-pipeline.md) (the CI that builds and signs the very
+assets this script downloads), and the [README](../README.md) for the quick-start.
 
 ---
 
