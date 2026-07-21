@@ -1,5 +1,5 @@
 Name:           override-tool
-Version:        1.1.0
+Version:        1.2.0
 Release:        1%{?dist}
 Summary:        Secure file-destruction tool (shred-like) with crypto-shredding
 
@@ -64,5 +64,8 @@ cargo test --release --locked || :
 %{_datadir}/bash-completion/completions/override
 
 %changelog
+* Tue Jul 21 2026 RaphtaliaShoko <raphael.canevet@pm.me> - 1.2.0-1
+- Release 1.2.0.
+
 * Tue Jul 21 2026 RaphtaliaShoko <raphael.canevet@pm.me> - 1.1.0-1
 - Initial RPM packaging of the override secure file-destruction tool.

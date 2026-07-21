@@ -34,9 +34,9 @@ Output directory can be overridden: `./packaging/build-deb.sh --outdir /path`.
 ## Installing and removing
 
 ```sh
-sudo apt install ./dist/override-tool_1.1.0-1_amd64.deb   # resolves dependencies
+sudo apt install ./dist/override-tool_1.2.0-1_amd64.deb   # resolves dependencies
 # or, without dependency resolution:
-sudo dpkg -i ./dist/override-tool_1.1.0-1_amd64.deb
+sudo dpkg -i ./dist/override-tool_1.2.0-1_amd64.deb
 
 sudo apt remove override-tool                             # uninstall
 ```

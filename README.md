@@ -47,7 +47,7 @@ On Debian/Ubuntu you can instead build a native **`.deb`** from this source tree
 
 ```sh
 ./packaging/build-deb.sh                           # → dist/override-tool_<ver>_<arch>.deb
-sudo apt install ./dist/override-tool_1.1.0-1_amd64.deb
+sudo apt install ./dist/override-tool_1.2.0-1_amd64.deb
 ```
 
 Details → **[docs/debian-package.md](docs/debian-package.md)**.
@@ -57,7 +57,7 @@ RPM host with `rpmbuild`/`cargo`):
 
 ```sh
 ./packaging/build-rpm.sh                            # → dist/override-tool-<ver>-<rel>.<arch>.rpm
-sudo dnf install ./dist/override-tool-1.1.0-1.fc44.x86_64.rpm
+sudo dnf install ./dist/override-tool-1.2.0-1.fc44.x86_64.rpm
 ```
 
 Details → **[docs/rpm-package.md](docs/rpm-package.md)**.
